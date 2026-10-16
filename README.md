@@ -1,10 +1,13 @@
-# LaserCAM CAD add-ins
+# LaserCAM CAD add-ins: SolidWorks and Fusion 360 to Odoo
 
-Open-source clients that connect CAD programs and Odoo to **LaserCAM** (https://laser.ucase.eu), a browser
-nesting and quoting tool for laser cutting. One click in SolidWorks or Fusion 360 sends the sheet metal flat
-pattern to LaserCAM (nesting, weight, cutting time, price) or attaches the DXF / STEP / PDF / CAD files straight
-to the Odoo product. The Odoo Connector does the same for whole bills of materials on Odoo Enterprise / Online,
-where custom modules cannot be installed.
+Open-source add-ins that connect CAD programs to **Odoo**. One button in SolidWorks or Fusion 360 attaches the
+sheet metal part's DXF flat pattern, STEP, PDF drawing and CAD file to the Odoo product (found or created from
+the part number), with your own Odoo API key and nothing in between - no LaserCAM account needed for that.
+
+Optionally the same button sends the flat pattern to **LaserCAM** (https://laser.ucase.eu), a browser nesting
+and quoting tool for laser cutting: nesting, weight, cutting time and price, and "Save to Odoo" writes the bill
+of materials sheet quantity, the laser work center and the operation time back into Odoo. The Odoo Connector
+does the same for whole bills of materials on Odoo Enterprise / Online, where custom modules cannot be installed.
 
 | Folder | What | Language |
 |---|---|---|
