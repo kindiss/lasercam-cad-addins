@@ -9,6 +9,13 @@ and quoting tool for laser cutting: nesting, weight, cutting time and price, and
 of materials sheet quantity, the laser work center and the operation time back into Odoo. The Odoo Connector
 does the same for whole bills of materials on Odoo Enterprise / Online, where custom modules cannot be installed.
 
+## Download
+
+Windows installer (SolidWorks add-in, Fusion 360 add-in, Odoo Connector in one setup):
+**https://github.com/kindiss/lasercam-cad-addins/releases/latest** - download `LaserCAM-Setup-<version>.exe`, run it,
+tick the parts you need. Requirements: Windows 10/11 64-bit, .NET Framework 4.5.2 or newer (built in),
+SolidWorks 2016+ and/or Fusion 360.
+
 | Folder | What | Language |
 |---|---|---|
 | `solidworks/addin/` | SolidWorks add-in (2016 and newer): LaserCAM tab, Send dialog, product / template picker | C# (.NET Framework 4.5.2+) |
