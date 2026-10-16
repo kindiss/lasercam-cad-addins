@@ -1,0 +1,12 @@
+# build output and binaries - never committed
+**/bin/
+**/obj/
+installer/Output/
+*.dll
+*.exe
+*.pdb
+*.zip
+__pycache__/
+*.pyc
+# SolidWorks interop assemblies belong to Dassault Systemes - copy them locally, see solidworks/addin/README.md
+solidworks/addin/lib/*.dll

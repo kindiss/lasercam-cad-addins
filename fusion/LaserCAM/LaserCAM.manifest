@@ -1,0 +1,13 @@
+{
+  "autodeskProduct": "Fusion360",
+  "type": "addin",
+  "id": "674cc165-0332-4074-ac9c-ac1ffdd6479d",
+  "author": "UCASE MB",
+  "description": {
+    "": "LaserCAM: send the sheet metal flat pattern to LaserCAM and Odoo"
+  },
+  "version": "1.0.6",
+  "runOnStartup": true,
+  "supportedOS": "windows|mac",
+  "editEnabled": true
+}
