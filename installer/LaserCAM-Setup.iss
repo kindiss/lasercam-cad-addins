@@ -49,6 +49,11 @@ WizardSmallImageFile=..\branding\wizard-small.bmp
 WizardStyle=modern
 CloseApplications=no
 SetupLogging=yes
+#ifdef SIGN
+; Signed build: ISCC /DSIGN "/Slasercam=<tools\sign.cmd> $f" - signs the installer and the uninstaller (see build-installer.cmd)
+SignTool=lasercam
+SignedUninstaller=yes
+#endif
 UsedUserAreasWarning=no
 
 [Languages]

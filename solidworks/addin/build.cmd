@@ -34,6 +34,9 @@ if errorlevel 1 (
   echo BUILD FAILED
   exit /b 1
 )
+if "%LASERCAM_SIGN%"=="1" if exist "%~dp0..\..\tools\sign.cmd" (
+  call "%~dp0..\..\tools\sign.cmd" bin\LaserCAM.SolidWorks.dll || exit /b 1
+)
 echo.
 echo Built bin\LaserCAM.SolidWorks.dll + SolidWorks.Interop.*.dll ^(runs on SolidWorks 2016 and newer^)
 echo Next: run install.cmd as Administrator.
