@@ -6,7 +6,7 @@
 ; Add a new CAD = new component + its files + (if needed) its [Run] line.
 
 #define AppName "LaserCAM CAD add-ins"
-#define AppVersion "1.3.6"
+#define AppVersion "1.3.7"
 #define Publisher "UCASE MB"
 #define AppUrl "https://laser.ucase.eu"
 #define SwDll "LaserCAM.SolidWorks.dll"

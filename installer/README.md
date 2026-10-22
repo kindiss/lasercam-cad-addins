@@ -36,3 +36,20 @@ FreeCAD mirrors Fusion (Python folder copy).
   use the separate per-user `fusion\installer\LaserCAM-Fusion-Setup` for that user.
 - Unsigned: SmartScreen shows "Unknown publisher" on first run. Sign the EXE (and the SolidWorks DLL) with a
   code-signing certificate before shipping to customers.
+
+## Signed release (code signing)
+
+Certificate: Certum "Open Source Code Signing in the Cloud" (SimplySign). Once per PC: install SimplySign Desktop,
+connect it (code from the SimplySign phone app) - the certificate then shows up in the Windows certificate store.
+Then build everything signed:
+
+```
+set LASERCAM_SIGN=1
+solidworksddinuild.cmd          (signs LaserCAM.SolidWorks.dll)
+odoo-connectoruild.cmd            (signs LaserCAM.OdooConnector.exe)
+installeruild-installer.cmd       (ISCC /DSIGN: signs the installer and the uninstaller)
+```
+
+`tools\sign.cmd` does the signing (SHA-256, Certum RFC3161 timestamp, so signatures outlive the certificate);
+`tools\signtool\` holds signtool.exe from the nuget package Microsoft.Windows.SDK.BuildTools (not in git).
+Without `LASERCAM_SIGN=1` every script builds unsigned, as before.

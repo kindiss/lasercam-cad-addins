@@ -11,13 +11,15 @@ if not exist "%SIGNTOOL%" (
   echo sign.cmd: signtool.exe not found in tools\signtool\ ^(nuget Microsoft.Windows.SDK.BuildTools, bin\*\x64^)
   exit /b 1
 )
-set SUBJECT=%LASERCAM_SIGN_SUBJECT%
-if "%SUBJECT%"=="" set SUBJECT=UCASE
+rem Certificate: issued 2026-10-22 to "MB Ucase" (Certum Code Signing 2021 CA, valid to 2027-10-22) - picked by thumbprint;
+rem set LASERCAM_SIGN_SHA1 to override (e.g. after renewal).
+set SHA1=%LASERCAM_SIGN_SHA1%
+if "%SHA1%"=="" set SHA1=FCCAC94725431BE29ADEF2307FAEA3ED5B8B26FF
 for %%F in (%*) do (
   echo signing %%~nxF ...
-  "%SIGNTOOL%" sign /n "%SUBJECT%" /fd sha256 /tr http://time.certum.pl /td sha256 /d "LaserCAM" /du "https://laser.ucase.eu" "%%~F"
+  "%SIGNTOOL%" sign /sha1 %SHA1% /fd sha256 /tr http://time.certum.pl /td sha256 /d "LaserCAM" /du "https://laser.ucase.eu" "%%~F"
   if errorlevel 1 (
-    echo sign.cmd: FAILED for %%~F - is SimplySign Desktop connected?
+    echo sign.cmd: FAILED for %%~F - is SimplySign Desktop running and connected ^(token from the phone app^)?
     exit /b 1
   )
 )
