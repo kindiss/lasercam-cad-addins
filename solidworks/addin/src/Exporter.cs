@@ -46,7 +46,18 @@ namespace LaserCAM.SolidWorks
         {
             if (model == null) { Ask("Open a sheet metal part first.", MessageBoxButtons.OK, MessageBoxIcon.Exclamation); return; }
             if (model.GetType() != (int)swDocumentTypes_e.swDocPART) { Ask("The active document is not a part.", MessageBoxButtons.OK, MessageBoxIcon.Exclamation); return; }
-            if (string.IsNullOrEmpty(_s.ODOO_API_KEY)) { Err("Fill in ODOO_API_KEY in the LaserCAM settings."); return; }
+            if (string.IsNullOrEmpty((_s.ODOO_URL ?? "").Trim()) || string.IsNullOrEmpty((_s.ODOO_API_KEY ?? "").Trim()))
+            {
+                // first run without the Odoo address / key: explain what is needed and open Settings (no bare HTTP 401 later)
+                Ask("LaserCAM is not connected to Odoo yet - " + (string.IsNullOrEmpty((_s.ODOO_URL ?? "").Trim()) ? "the Odoo address (ODOO_URL)" : "the Odoo API key (ODOO_API_KEY)") + " is missing.\n\n"
+                    + "Fill in the LaserCAM settings:\n"
+                    + "- ODOO_URL: your Odoo address, e.g. https://company.odoo.com\n"
+                    + "- ODOO_API_KEY: in Odoo open My profile > Account security > New API key, copy it once and paste it here (keys are stored encrypted and cannot be viewed again)\n"
+                    + "- ODOO_DB: only for on-premise Odoo with several databases\n\n"
+                    + "The settings window opens now; after saving, click Send to Odoo again.", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                using (var f = new SettingsForm(_s)) f.ShowDialog();
+                return;
+            }
             using (var prog = new ProgressForm("LaserCAM - sending " + CleanTitle(model.GetTitle())))
             {
                 _prog = prog;

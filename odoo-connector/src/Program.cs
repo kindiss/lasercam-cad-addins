@@ -8,8 +8,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("UCASE MB")]
 [assembly: AssemblyProduct("LaserCAM")]
 [assembly: AssemblyCopyright("UCASE MB")]
-[assembly: AssemblyVersion("1.0.1.0")]
-[assembly: AssemblyFileVersion("1.0.1.0")]
+[assembly: AssemblyVersion("1.0.2.0")]
+[assembly: AssemblyFileVersion("1.0.2.0")]
 [assembly: ComVisible(false)]
 
 namespace LaserCAM.OdooConnector

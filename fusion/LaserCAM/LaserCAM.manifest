@@ -6,7 +6,7 @@
   "description": {
     "": "LaserCAM: send the sheet metal flat pattern to LaserCAM and Odoo"
   },
-  "version": "1.0.6",
+  "version": "1.0.7",
   "runOnStartup": true,
   "supportedOS": "windows|mac",
   "editEnabled": true

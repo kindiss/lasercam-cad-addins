@@ -245,6 +245,9 @@ def http(method, url, body=None, headers=None, timeout=600):
         except Exception:
             text = ""
         return e.code, text
+    except (urllib.error.URLError, OSError) as e:
+        # no connection / wrong host / timeout -> status 0, the callers turn it into a plain-language message
+        return 0, str(getattr(e, "reason", e))
 
 
 # ---------------- LaserCAM ----------------
@@ -282,6 +285,52 @@ def lc_post(s, path, body):
 
 
 # ---------------- Odoo (JSON-2 API, Odoo 17+/Online; bearer API key) ----------------
+def odoo_http_message(s, status, resp, what):
+    """Plain-language text for a failed Odoo request (shown to the user instead of the raw HTTP status)."""
+    url = str(s.get("ODOO_URL") or "")
+    if status == 0:
+        return ("Cannot reach Odoo at %s (%s).\n\nCheck ODOO_URL in LaserCAM Settings (e.g. https://company.odoo.com), "
+                "the internet connection and VPN." % (url or "(ODOO_URL is empty)", resp[:120]))
+    if status in (401, 403):
+        if not str(s.get("ODOO_API_KEY") or "").strip():
+            return ("Odoo rejected the request because the API key is empty (HTTP %s).\n\nLaserCAM Settings -> ODOO_API_KEY: "
+                    "in Odoo open My profile > Account security > New API key, copy the key and paste it there. "
+                    "Keys are stored encrypted and cannot be viewed again - if lost, create a new one." % status)
+        return ("Odoo rejected the API key (HTTP %s).\n\nThe key in LaserCAM Settings is wrong, revoked or belongs to another Odoo. "
+                "Create a new key in Odoo (My profile > Account security > New API key) and paste it into ODOO_API_KEY. "
+                "On-premise Odoo with several databases also needs ODOO_DB." % status)
+    if status == 404:
+        return ("Odoo did not answer at %s (HTTP 404, %s).\n\nCheck ODOO_URL in LaserCAM Settings. This direct connection needs Odoo 19 or newer; "
+                "for older Odoo use the LaserCAM Connector module (Odoo App Store)." % (url, what))
+    if status >= 500:
+        return "Odoo server error (HTTP %s) on %s:\n%s" % (status, what, resp[:300])
+    return "Odoo %s -> HTTP %s: %s" % (what, status, resp[:300])
+
+
+def odoo_ready(s):
+    """First-run guard: without the Odoo address or API key every request would fail with a bare 401 -
+    explain what is missing and open LaserCAM Settings instead."""
+    url = str(s.get("ODOO_URL") or "").strip()
+    key = str(s.get("ODOO_API_KEY") or "").strip()
+    if url and key:
+        return True
+    missing = [name for name, ok in (("the Odoo address (ODOO_URL)", bool(url)), ("the Odoo API key (ODOO_API_KEY)", bool(key))) if not ok]
+    warn("LaserCAM is not connected to Odoo yet - %s %s missing.\n\n"
+         "Fill in LaserCAM Settings:\n"
+         "- ODOO_URL: your Odoo address, e.g. https://company.odoo.com\n"
+         "- ODOO_API_KEY: in Odoo open My profile > Account security > New API key, copy it once and paste it here "
+         "(keys are stored encrypted and cannot be viewed again)\n"
+         "- ODOO_DB: only for on-premise Odoo with several databases\n\n"
+         "The Settings dialog opens now." % (" and ".join(missing), "are" if len(missing) > 1 else "is"))
+    try:
+        cd = _ui.commandDefinitions.itemById(CMD_SETTINGS_ID)
+        if cd:
+            cd.execute()
+    except Exception:
+        pass
+    return False
+
+
 def odoo_call(s, model, method, kwargs):
     headers = {"Authorization": "bearer " + str(s.get("ODOO_API_KEY") or "")}
     if s.get("ODOO_DB"):
@@ -289,7 +338,7 @@ def odoo_call(s, model, method, kwargs):
     url = s["ODOO_URL"].rstrip("/") + "/json/2/" + model + "/" + method
     status, resp = http("POST", url, kwargs, headers, timeout=120)
     if status < 200 or status >= 300:
-        raise RuntimeError("Odoo %s.%s -> %s: %s" % (model, method, status, resp[:300]))
+        raise RuntimeError(odoo_http_message(s, status, resp, "%s.%s" % (model, method)))
     try:
         return json.loads(resp)
     except Exception:
@@ -1040,6 +1089,8 @@ class SendCreatedHandler(adsk.core.CommandCreatedEventHandler):
             cmd = args.command
             _pending.clear()
             s = load_settings()
+            if not odoo_ready(s):
+                return
             design = get_design()
             if not design:
                 return

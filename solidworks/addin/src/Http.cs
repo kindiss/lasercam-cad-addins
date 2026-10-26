@@ -66,7 +66,8 @@ namespace LaserCAM.SolidWorks
             catch (WebException ex)
             {
                 res = ex.Response as HttpWebResponse;
-                if (res == null) throw;
+                // no response at all = no connection / wrong host / timeout -> plain-language text (not a raw WebException)
+                if (res == null) throw new Exception("Cannot reach " + new Uri(url).GetLeftPart(UriPartial.Authority) + " (" + ex.Message + ").\n\nCheck the address in Settings (ODOO_URL / LC_API), the internet connection and VPN.");
             }
             using (res)
             {
@@ -89,6 +90,23 @@ namespace LaserCAM.SolidWorks
         readonly string _url, _apiKey, _db;
         public OdooClient(string url, string apiKey, string db) { _url = url.TrimEnd('/'); _apiKey = apiKey; _db = db; }
 
+        /// Plain-language text for a failed Odoo request (shown to the user instead of the raw HTTP status).
+        string OdooMessage(int status, string resp, string what)
+        {
+            string tail = resp.Length > 300 ? resp.Substring(0, 300) : resp;
+            if (status == 401 || status == 403)
+            {
+                if (string.IsNullOrEmpty((_apiKey ?? "").Trim()))
+                    return "Odoo rejected the request because the API key is empty (HTTP " + status + ").\n\nSettings -> ODOO_API_KEY: in Odoo open My profile > Account security > New API key, copy the key and paste it there. Keys are stored encrypted and cannot be viewed again - if lost, create a new one.";
+                return "Odoo rejected the API key (HTTP " + status + ").\n\nThe key in Settings is wrong, revoked or belongs to another Odoo. Create a new key in Odoo (My profile > Account security > New API key) and paste it into ODOO_API_KEY. On-premise Odoo with several databases also needs ODOO_DB.";
+            }
+            if (status == 404)
+                return "Odoo did not answer at " + _url + " (HTTP 404, " + what + ").\n\nCheck ODOO_URL in Settings. This direct connection needs Odoo 19 or newer; for older Odoo use the LaserCAM Connector module (Odoo App Store).";
+            if (status >= 500)
+                return "Odoo server error (HTTP " + status + ") on " + what + ":\n" + tail;
+            return "Odoo " + what + " -> HTTP " + status + ": " + tail;
+        }
+
         public object Call(string model, string method, Dictionary<string, object> kwargs)
         {
             var h = new Dictionary<string, string> { { "Authorization", "bearer " + _apiKey } };
@@ -96,7 +114,7 @@ namespace LaserCAM.SolidWorks
             int status;
             string resp = Http.Send("POST", _url + "/json/2/" + model + "/" + method, Json.Write(kwargs), h, out status, 120000);
             if (status < 200 || status >= 300)
-                throw new Exception("Odoo " + model + "." + method + " -> " + status + ": " + (resp.Length > 300 ? resp.Substring(0, 300) : resp));
+                throw new Exception(OdooMessage(status, resp, model + "." + method));
             return Json.Read(resp);
         }
 
