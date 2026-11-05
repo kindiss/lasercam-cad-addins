@@ -69,7 +69,7 @@ namespace LaserCAM.OdooConnector
             var bomIds = boms.Select(b => Convert.ToInt32(b["id"])).ToArray();
             var lines = o.SearchRead("mrp.bom.line", new object[] { new object[] { "bom_id", "in", bomIds } }, new[] { "id", "bom_id", "product_id", "product_qty" }, 5000);
             var ops = o.SearchRead("mrp.routing.workcenter", new object[] { new object[] { "bom_id", "in", bomIds } }, new[] { "id", "bom_id", "name", "workcenter_id", "time_cycle_manual" }, 5000);
-            var atts = o.SearchRead("ir.attachment", new object[] { new object[] { "res_model", "=", "product.template" }, new object[] { "res_id", "in", tmplIds }, new object[] { "name", "=ilike", "%.dxf" } }, new[] { "id", "res_id" }, 5000);
+            var atts = o.SearchRead("ir.attachment", new object[] { new object[] { "res_model", "=", "product.template" }, new object[] { "res_id", "in", tmplIds }, "|", "|", new object[] { "name", "=ilike", "%.dxf" }, new object[] { "name", "=ilike", "%.step" }, new object[] { "name", "=ilike", "%.stp" } }, new[] { "id", "res_id" }, 5000);
             foreach (var b in boms)
             {
                 var bi = new BomInfo { Id = Convert.ToInt32(b["id"]), TmplId = Json.M2oId(b["product_tmpl_id"]), ProductId = Json.M2oId(b["product_id"]) };
@@ -100,8 +100,9 @@ namespace LaserCAM.OdooConnector
             return b.Ops.Count > 0 ? b.Ops[0] : null;
         }
 
-        /// Newest .dxf attachment of the product (template or variant) -> (file name with the code, base64) or null.
-        static KeyValuePair<string, string>? ProductDxf(OdooClient o, BomInfo b)
+        /// Product geometry (template or variant): the newest .dxf and/or the newest STEP (.step/.stp) -> (file name with the code, base64).
+        /// LaserCAM unfolds a STEP (Pro); when a product has both, LaserCAM asks which one to nest from (module 5.4.0 rule).
+        static List<KeyValuePair<string, string>> ProductDxf(OdooClient o, BomInfo b)
         {
             var domain = new object[]
             {
@@ -110,18 +111,26 @@ namespace LaserCAM.OdooConnector
                 "&", new object[] { "res_model", "=", "product.product" }, new object[] { "res_id", "=", b.ProductId },
             };
             var atts = o.SearchRead("ir.attachment", domain, new[] { "id", "name" }, 50);
+            KeyValuePair<string, string>? dxf = null, step = null; // the newest of each kind
             foreach (var a in atts.OrderByDescending(a => Convert.ToInt32(a["id"])))
             {
                 string fname = Json.Str(a, "name");
-                if (!fname.ToLowerInvariant().EndsWith(".dxf")) continue;
+                string low = fname.ToLowerInvariant();
+                bool isStep = low.EndsWith(".step") || low.EndsWith(".stp");
+                if (!low.EndsWith(".dxf") && !isStep) continue;
+                if (isStep ? step != null : dxf != null) continue;
                 var data = o.SearchRead("ir.attachment", new object[] { new object[] { "id", "=", Convert.ToInt32(a["id"]) } }, new[] { "datas" }, 1);
                 string b64 = data.Count > 0 ? Json.Str(data[0], "datas") : "";
                 if (b64 == "") continue;
                 // the app links DXF <-> BOM by the code in the file name
                 if (b.ShortCode != "" && !fname.Contains(b.ShortCode)) fname = b.ShortCode + "_" + fname;
-                return new KeyValuePair<string, string>(fname, b64);
+                if (isStep) step = new KeyValuePair<string, string>(fname, b64); else dxf = new KeyValuePair<string, string>(fname, b64);
+                if (dxf != null && step != null) break;
             }
-            return null;
+            var list = new List<KeyValuePair<string, string>>();
+            if (dxf != null) list.Add(dxf.Value);
+            if (step != null) list.Add(step.Value);
+            return list;
         }
 
         /// `_collect`: BOM rows + WC rows + DXF files for the selected BOMs.
@@ -137,13 +146,12 @@ namespace LaserCAM.OdooConnector
                 string bomXid = Xid("mrp.bom", b.Id);
                 if (b.ShortCode != "" && !pkg.Codes.Contains(b.ShortCode)) pkg.Codes.Add(b.ShortCode);
                 if (pkg.TemplateTmplId == 0) pkg.TemplateTmplId = b.TmplId;   // module: the exported product becomes the copy() template
-                var dxf = ProductDxf(o, b);
-                if (dxf != null)
+                foreach (var dxf in ProductDxf(o, b)) // DXF and/or STEP (both -> LaserCAM asks)
                 {
-                    string name = dxf.Value.Key, baseName = name; int i = 1;
+                    string name = dxf.Key, baseName = name; int i = 1;
                     while (dxfNames.Contains(name)) { int dot = baseName.LastIndexOf('.'); name = dot > 0 ? baseName.Substring(0, dot) + "_" + i + baseName.Substring(dot) : baseName + "_" + i; i++; }
                     dxfNames.Add(name);
-                    pkg.Dxfs.Add(new KeyValuePair<string, string>(name, dxf.Value.Value));
+                    pkg.Dxfs.Add(new KeyValuePair<string, string>(name, dxf.Value));
                 }
                 var op = PickLaserOp(b);
                 string laserName = b.ShortCode != "" ? "Laser " + b.ShortCode : "";
