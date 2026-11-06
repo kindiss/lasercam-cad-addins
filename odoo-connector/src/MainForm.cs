@@ -23,10 +23,12 @@ namespace LaserCAM.OdooConnector
         readonly Button _btnSettings = new Button { Text = "Settings...", Width = 90 };
         readonly Button _btnNest = new Button { Text = "Nest in LaserCAM", Width = 150, Height = 32 };
         readonly CheckBox _template = new CheckBox { Text = "Template only (new products are copies of it)", AutoSize = true, Checked = true };
-        readonly ListView _list = new ListView { View = View.Details, CheckBoxes = true, FullRowSelect = true, Dock = DockStyle.Fill, HideSelection = false };
+        readonly ListView _list = new ListView { View = View.Details, CheckBoxes = true, FullRowSelect = true, Dock = DockStyle.Fill, HideSelection = false, ShowItemToolTips = true };
         readonly Label _status = new Label { Dock = DockStyle.Bottom, Height = 22, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(8, 0, 0, 0) };
         readonly Label _odooLbl = new Label { AutoSize = true, ForeColor = SystemColors.GrayText, Margin = new Padding(12, 8, 3, 3) };
         List<BomInfo> _boms = new List<BomInfo>();
+        const int PdfCol = 6;
+        bool _pdfBusy;
 
         public MainForm()
         {
@@ -41,7 +43,7 @@ namespace LaserCAM.OdooConnector
             var bottom = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 46, Padding = new Padding(8, 6, 8, 0), FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
             bottom.Controls.AddRange(new Control[] { _btnNest, new Label { Width = 20 }, _template });
             _template.Margin = new Padding(3, 9, 3, 3);
-            foreach (var c in new[] { new { n = "Code", w = 110 }, new { n = "Product", w = 330 }, new { n = "Components", w = 90 }, new { n = "Sheet (raw material)", w = 230 }, new { n = "Laser work center", w = 140 }, new { n = "DXF / STEP", w = 80 } })
+            foreach (var c in new[] { new { n = "Code", w = 110 }, new { n = "Product", w = 330 }, new { n = "Components", w = 90 }, new { n = "Sheet (raw material)", w = 230 }, new { n = "Laser work center", w = 140 }, new { n = "DXF / STEP", w = 80 }, new { n = "Drawing", w = 60 } })
                 _list.Columns.Add(c.n, c.w);
             Controls.Add(_list); Controls.Add(top); Controls.Add(bottom); Controls.Add(_status);
             _list.BringToFront();
@@ -50,6 +52,14 @@ namespace LaserCAM.OdooConnector
             _search.KeyDown += (o, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; var _ = LoadBoms(); } };
             _btnSettings.Click += (o, e) => { if (EditSettings()) { var _ = LoadBoms(); } };
             _btnNest.Click += (o, e) => { var _ = Nest(); };
+            // "Drawing" column: click PDF -> download the product's (else the BOM's) drawing and open it with the default PDF app.
+            _list.MouseClick += (o, e) =>
+            {
+                var hit = _list.HitTest(e.Location);
+                if (hit.Item == null || hit.SubItem == null || hit.Item.SubItems.IndexOf(hit.SubItem) != PdfCol) return;
+                var b = (BomInfo)hit.Item.Tag;
+                if (b.PdfAttId > 0) { var _ = OpenPdf(b); }
+            };
             Shown += async (o, e) =>
             {
                 _s = Settings.Load();
@@ -94,12 +104,13 @@ namespace LaserCAM.OdooConnector
                 _list.Items.Clear();
                 foreach (var b in boms)
                 {
-                    var it = new ListViewItem(new[] { b.Code, b.ProductName, b.Lines.Count.ToString(), b.SheetName, b.LaserOp, b.DxfCount > 0 ? "yes" : "-" }) { Tag = b };
+                    var it = new ListViewItem(new[] { b.Code, b.ProductName, b.Lines.Count.ToString(), b.SheetName, b.LaserOp, b.DxfCount > 0 ? "yes" : "-", b.PdfAttId > 0 ? "PDF" : "-" }) { Tag = b };
+                    if (b.PdfAttId > 0) { it.UseItemStyleForSubItems = false; it.SubItems[PdfCol].ForeColor = Color.RoyalBlue; it.SubItems[PdfCol].Font = new Font(Font, FontStyle.Underline); it.ToolTipText = "Drawing: " + b.PdfName + " (click PDF to open)"; }
                     if (b.DxfCount == 0) it.ForeColor = SystemColors.GrayText;
                     _list.Items.Add(it);
                 }
                 _list.EndUpdate();
-                Status(boms.Count + " bills of materials" + (q.Trim() != "" ? " matching \"" + q.Trim() + "\"" : " (newest)") + ". Tick one or more and click Nest in LaserCAM. Grey = no DXF or STEP attached.");
+                Status(boms.Count + " bills of materials" + (q.Trim() != "" ? " matching \"" + q.Trim() + "\"" : " (newest)") + ". Tick one or more and click Nest in LaserCAM. Grey = no DXF or STEP attached. Click PDF to open the drawing.");
             }
             catch (Exception ex)
             {
@@ -107,6 +118,26 @@ namespace LaserCAM.OdooConnector
                 MessageBox.Show("Could not read Odoo:\n" + ex.Message + "\n\nCheck ODOO_URL / ODOO_API_KEY in Settings and that the user has Manufacturing rights.", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally { _btnSearch.Enabled = true; }
+        }
+
+        async Task OpenPdf(BomInfo b)
+        {
+            if (_pdfBusy) return;
+            _pdfBusy = true;
+            try
+            {
+                Status("Downloading " + b.PdfName + " from Odoo...");
+                string path = await Task.Run(() => OdooExport.DownloadPdf(_odoo, b));
+                if (path == null) { Status("The drawing " + b.PdfName + " has no content in Odoo."); return; }
+                Process.Start(path);
+                Status("Opened " + b.PdfName + ".");
+            }
+            catch (Exception ex)
+            {
+                Status("Could not open the drawing: " + ex.Message);
+                MessageBox.Show("Could not open the drawing:\n" + ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally { _pdfBusy = false; }
         }
 
         async Task Nest()
@@ -117,16 +148,16 @@ namespace LaserCAM.OdooConnector
             _btnNest.Enabled = false;
             try
             {
-                Status("Collecting BOM lines, work centers and DXF / STEP files from Odoo...");
+                Status("Collecting BOM lines, work centers and DXF / STEP / PDF files from Odoo...");
                 var pkg = await Task.Run(() => OdooExport.Collect(_odoo, sel));
-                if (pkg.Dxfs.Count == 0 && MessageBox.Show("None of the selected products has a DXF or STEP attachment. LaserCAM will open the BOM without parts (you can drop DXF or STEP files there). Continue?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                if (!pkg.Dxfs.Any(d => !d.Name.ToLowerInvariant().EndsWith(".pdf")) && MessageBox.Show("None of the selected products has a DXF or STEP attachment. LaserCAM will open the BOM without parts (you can drop DXF or STEP files there). Continue?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
                 Status("Creating the LaserCAM job...");
                 var odoo = new Dictionary<string, object> { { "url", _s.ODOO_URL }, { "apiKey", _s.ODOO_API_KEY } };
                 if (!string.IsNullOrEmpty(_s.ODOO_DB)) odoo["db"] = _s.ODOO_DB;
                 var body = new Dictionary<string, object>
                 {
                     { "bom_csv", pkg.BomCsv }, { "wc_csv", pkg.WcCsv },
-                    { "dxfs", pkg.Dxfs.Select(d => new Dictionary<string, object> { { "name", d.Key }, { "b64", d.Value } }).ToArray() },
+                    { "dxfs", pkg.Dxfs.Select(d => new Dictionary<string, object> { { "name", d.Name }, { "b64", d.B64 }, { "source", d.Source } }).ToArray() },
                     { "odoo", odoo }, { "template", _template.Checked },
                     { "templateTmplId", pkg.TemplateTmplId },
                 };
@@ -134,7 +165,8 @@ namespace LaserCAM.OdooConnector
                 string url = Json.Str(resp, "url");
                 if (url == "") throw new Exception("LaserCAM did not return a job url.");
                 Process.Start(url);
-                Status("LaserCAM opened in the browser with " + string.Join(", ", pkg.Codes) + " (" + pkg.Dxfs.Count + " DXF / STEP). Nest there and click \"Save to Odoo\". The link works once, for 1 hour.");
+                string left = pkg.SkippedPdfs.Count > 0 ? " Drawings left out to keep the job small: " + string.Join(", ", pkg.SkippedPdfs) + "." : "";
+                Status("LaserCAM opened in the browser with " + string.Join(", ", pkg.Codes) + " (" + pkg.Dxfs.Count + " DXF / STEP / PDF). Nest there and click \"Save to Odoo\". The link works once, for 1 hour." + left);
             }
             catch (Exception ex)
             {
