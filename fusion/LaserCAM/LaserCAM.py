@@ -1,5 +1,5 @@
 # ============================================================================
-#  LaserCAM - "Send to Odoo" (Autodesk Fusion add-in, Python)
+#  LaserCAM - "Send to LaserCAM" (Autodesk Fusion add-in, Python)
 #
 #  One-to-one port of the SolidWorks VBA macro solidworks/ExportToOdoo.bas.
 #  One click on the active sheet metal component:
@@ -12,6 +12,9 @@
 #       there and clicks "Save to Odoo".
 #       OPEN_APP = false: silent /api/quote, then weight + DXF + quote summary are written
 #       to Odoo from here.
+#
+#  Without Odoo (ODOO_URL and ODOO_API_KEY both empty, LC_PID + LC_KEY set): step 3 is skipped -
+#  thickness and material come from Fusion, the Part Number is optional, nothing touches Odoo.
 #
 #  Settings: %APPDATA%\LaserCAM\fusion-settings.json (command "LaserCAM Settings").
 # ============================================================================
@@ -61,7 +64,7 @@ DEFAULTS = {
     "SPACING": 5.0,
     "PRICE_PER_KG": 0.9,
     "QUANTITY": 1,
-    "SEND_MODE": "lasercam",      # last choice in the Send dialog: lasercam | odoo (files straight to the product)
+    "SEND_MODE": "lasercam",      # last choice in the Send dialog: lasercam-only | lasercam | odoo (files straight to the product)
     "ATTACH_DXF": True,           # Send dialog defaults (direct send): DXF flat pattern
     "ATTACH_STEP": True,          # STEP export
     "ATTACH_CAD": True,           # Fusion archive (.f3d)
@@ -307,6 +310,35 @@ def odoo_http_message(s, status, resp, what):
     return "Odoo %s -> HTTP %s: %s" % (what, status, resp[:300])
 
 
+def odoo_blank(s):
+    """No Odoo address and no Odoo API key: the user works with LaserCAM only (no Odoo)."""
+    return not str(s.get("ODOO_URL") or "").strip() and not str(s.get("ODOO_API_KEY") or "").strip()
+
+
+def lasercam_key_set(s):
+    return bool(str(s.get("LC_KEY") or "")) and to_int(s.get("LC_PID")) > 0
+
+
+def open_settings():
+    try:
+        cd = _ui.commandDefinitions.itemById(CMD_SETTINGS_ID)
+        if cd:
+            cd.execute()
+    except Exception:
+        pass
+
+
+def not_set_up():
+    """First run with nothing filled in: both ways to use the add-in, then LaserCAM Settings."""
+    warn("LaserCAM is not set up yet. Fill in LaserCAM Settings one of two ways:\n\n"
+         "1. LaserCAM only (no Odoo): LC_PID and LC_KEY - your LaserCAM key from laser.ucase.eu (Basic plan). "
+         "The flat pattern opens in LaserCAM for nesting.\n\n"
+         "2. With Odoo: ODOO_URL and ODOO_API_KEY (in Odoo: My profile > Account security > New API key). "
+         "Add LC_PID and LC_KEY too if you want nesting, weight and time in LaserCAM.\n\n"
+         "The Settings dialog opens now.")
+    open_settings()
+
+
 def odoo_ready(s):
     """First-run guard: without the Odoo address or API key every request would fail with a bare 401 -
     explain what is missing and open LaserCAM Settings instead."""
@@ -322,12 +354,7 @@ def odoo_ready(s):
          "(keys are stored encrypted and cannot be viewed again)\n"
          "- ODOO_DB: only for on-premise Odoo with several databases\n\n"
          "The Settings dialog opens now." % (" and ".join(missing), "are" if len(missing) > 1 else "is"))
-    try:
-        cd = _ui.commandDefinitions.itemById(CMD_SETTINGS_ID)
-        if cd:
-            cd.execute()
-    except Exception:
-        pass
+    open_settings()
     return False
 
 
@@ -568,10 +595,10 @@ def find_sheet_metal(design):
     if len(found) == 1:
         return found[0]
     if len(found) > 1:
-        err("Several components have sheet metal bodies: %s. Select the body (or the component) to send, then click Send to Odoo again." % ", ".join(c.name for c, _ in found))
+        err("Several components have sheet metal bodies: %s. Select the body (or the component) to send, then click Send to LaserCAM again." % ", ".join(c.name for c, _ in found))
         return None, None
     nbodies = root.bRepBodies.count
-    err("No sheet metal body found in \"%s\" (%d solid bodies). The part must be a Fusion sheet metal body: select the body, Sheet Metal -> Convert to Sheet Metal (imported SolidWorks / STEP bodies are plain solids), then click Send to Odoo again." % (root.name, nbodies))
+    err("No sheet metal body found in \"%s\" (%d solid bodies). The part must be a Fusion sheet metal body: select the body, Sheet Metal -> Convert to Sheet Metal (imported SolidWorks / STEP bodies are plain solids), then click Send to LaserCAM again." % (root.name, nbodies))
     return None, None
 
 
@@ -706,10 +733,25 @@ def component_number(comp):
     return number
 
 
+def part_label(comp):
+    """Part id for LaserCAM without Odoo: the Part Number when it is really set, else the component name.
+    Never asks and never changes the component (the number is not needed without Odoo)."""
+    stamp = r"^\d{4}-\d{2}-\d{2}"
+    number = (comp.partNumber or "").strip()
+    if number and number != comp.name and not re.match(stamp, number):
+        return number
+    name = clean_title(comp.name or "")
+    return name if name and not re.match(stamp, name) else "part"
+
+
 def send_to_odoo(pick=None, pending=None):
-    """pick: None (find by number / create) or {"mode": product|template|new, "pid", "tmpl", "code"} from the picker."""
+    """pick: None (find by number / create) or {"mode": product|template|new, "pid", "tmpl", "code"} from the picker.
+    pending["odoo"] is False on the LaserCAM-only path (no Odoo settings, or "LaserCAM only" chosen in the Send
+    dialog): nothing is read from or written to Odoo."""
+    use_odoo = True
     if pending:
         s, design, comp, body, title, number = pending["s"], pending["design"], pending["comp"], pending["body"], pending["title"], pending["number"]
+        use_odoo = pending.get("odoo", True)
     else:
         s = load_settings()
         design = get_design()
@@ -727,7 +769,7 @@ def send_to_odoo(pick=None, pending=None):
         if pick and pick.get("action") == "odoo":
             _direct_send(s, design, comp, body, title, number, progress, pick)
         else:
-            _send_steps(s, design, comp, body, title, number, progress, pick)
+            _send_steps(s, design, comp, body, title, number, progress, pick, use_odoo)
     finally:
         progress.hide()
 
@@ -780,7 +822,8 @@ def _direct_send(s, design, comp, body, title, number, progress, pick):
     msg("Odoo product %s: %s\n\nAttached: %s" % ("CREATED" if created else "updated", number, attached or "nothing (no file could be exported)"))
 
 
-def _send_steps(s, design, comp, body, title, number, progress, pick=None):
+def _send_steps(s, design, comp, body, title, number, progress, pick=None, use_odoo=True):
+    """use_odoo False = LaserCAM only: thickness and material from Fusion, no Odoo product, nothing written to Odoo."""
     progress(3, "Reading the component...")
 
     # 1. Flat pattern DXF (created first: the thickness fallback measures it)
@@ -793,30 +836,32 @@ def _send_steps(s, design, comp, body, title, number, progress, pick=None):
     fusion_thick = sheet_thickness_mm(comp, fp)
 
     # Odoo product first: its BOM sheet line (or the template product's) defines material + thickness + sheet.
-    progress(25, "Looking up the Odoo product %s..." % number)
-    try:
-        pid, tmpl, number, created, template_tmpl = _resolve_product(s, comp, title, number, pick)
-        if pid == 0:
-            if pick:
-                err("Could not find or create the Odoo product.")
+    pid, tmpl, created = 0, 0, False
+    sheet, sheet_source = None, ""
+    if use_odoo:
+        progress(25, "Looking up the Odoo product %s..." % number)
+        try:
+            pid, tmpl, number, created, template_tmpl = _resolve_product(s, comp, title, number, pick)
+            if pid == 0:
+                if pick:
+                    err("Could not find or create the Odoo product.")
+                return
+            if s.get("USE_ODOO_SHEET"):
+                sheet = odoo_sheet_of(s, tmpl)
+                if sheet:
+                    sheet_source = "product BOM"
+                elif template_tmpl and odoo_sheet_of(s, template_tmpl):
+                    sheet = odoo_sheet_of(s, template_tmpl)
+                    sheet_source = "chosen template"
+                elif s.get("TEMPLATE_NUMBER"):
+                    tp = odoo_find_product(s, s["TEMPLATE_NUMBER"])
+                    if tp > 0:
+                        sheet = odoo_sheet_of(s, odoo_template_of(s, tp))
+                        if sheet:
+                            sheet_source = "template " + s["TEMPLATE_NUMBER"]
+        except Exception as e:
+            err("Odoo error: %s" % e)
             return
-        sheet, sheet_source = None, ""
-        if s.get("USE_ODOO_SHEET"):
-            sheet = odoo_sheet_of(s, tmpl)
-            if sheet:
-                sheet_source = "product BOM"
-            elif template_tmpl and odoo_sheet_of(s, template_tmpl):
-                sheet = odoo_sheet_of(s, template_tmpl)
-                sheet_source = "chosen template"
-            elif s.get("TEMPLATE_NUMBER"):
-                tp = odoo_find_product(s, s["TEMPLATE_NUMBER"])
-                if tp > 0:
-                    sheet = odoo_sheet_of(s, odoo_template_of(s, tp))
-                    if sheet:
-                        sheet_source = "template " + s["TEMPLATE_NUMBER"]
-    except Exception as e:
-        err("Odoo error: %s" % e)
-        return
 
     sheet_product_id = 0
     if sheet:
@@ -856,9 +901,12 @@ def _send_steps(s, design, comp, body, title, number, progress, pick=None):
         dxf = f.read()
 
     # 2. LaserCAM
+    part = {"id": number, "name": title, "dxf": dxf, "quantity": to_int(s.get("QUANTITY"), 1),
+            "thicknessMm": thick, "material": material, "gas": gas}
+    if use_odoo:
+        part["odooProductId"] = pid
     body_json = {
-        "parts": [{"id": number, "name": title, "dxf": dxf, "quantity": to_int(s.get("QUANTITY"), 1),
-                   "thicknessMm": thick, "material": material, "gas": gas, "odooProductId": pid}],
+        "parts": [part],
         "sheet": {"width": sh_w, "height": sh_h, "margin": to_float(s.get("SHEET_MARGIN"), 5)},
         "spacing": to_float(s.get("SPACING"), 5),
         "pricePerKg": to_float(s.get("PRICE_PER_KG"), 0),
@@ -868,7 +916,7 @@ def _send_steps(s, design, comp, body, title, number, progress, pick=None):
         job = dict(body_json)
         job["number"] = number
         job["source"] = "Fusion"
-        if s.get("SEND_ODOO_FROM_APP"):
+        if use_odoo and s.get("SEND_ODOO_FROM_APP"):
             odoo = {"url": s["ODOO_URL"], "apiKey": s.get("ODOO_API_KEY") or ""}
             if s.get("ODOO_DB"):
                 odoo["db"] = s["ODOO_DB"]
@@ -903,6 +951,8 @@ def _send_steps(s, design, comp, body, title, number, progress, pick=None):
         progress.hide()
         msg("LaserCAM opened in the browser with %s (%s, %s mm, sheet %s x %s).\n\n%s"
             % (number, material, num_str(thick), num_str(sh_w), num_str(sh_h),
+               "Nest it there, then download the cutting file (DXF) or the PDF report."
+               if not use_odoo else
                "Nest it there and click \"Save to Odoo\" - weight, DXF, BOM sheet quantity and laser time go straight to Odoo."
                if s.get("SEND_ODOO_FROM_APP") else
                "Nest it there and click \"Save to Odoo\"; LaserCAM writes the result to Odoo."))
@@ -929,6 +979,15 @@ def _send_steps(s, design, comp, body, title, number, progress, pick=None):
     algo = part.get("algo") or ""
     warnings = part.get("warnings") or []
     warn_text = ", ".join(str(w) for w in warnings) if isinstance(warnings, list) else str(warnings)
+
+    if not use_odoo:
+        # LaserCAM only: the numbers go into the component and on screen, nothing is written to Odoo
+        set_attributes(comp, {"LC_NetKg": net_kg, "LC_UsedKg": used_kg, "LC_CutSec": secs, "LC_Price": price})
+        msg("LaserCAM quote: %s\n\nThickness %s mm, %s, %s\nSheet %s x %s mm\nNet weight: %s kg\nWith waste: %s kg\n"
+            "Cutting time: %s s\nPrice: %s EUR\nParts per sheet: %s (%s)%s"
+            % (number, num_str(thick), material, gas, num_str(sh_w), num_str(sh_h), net_kg, used_kg, secs, price,
+               per_sheet, algo, ("\n\nWarning: " + warn_text) if warn_text else ""), "LaserCAM")
+        return
 
     # 3. Odoo: write results
     try:
@@ -1048,18 +1107,25 @@ class PickerExecuteHandler(adsk.core.CommandEventHandler):
             mode = "product" if sel.startswith("This is") else ("template" if sel.startswith("Use as") else "new")
             act_in = inputs.itemById("action")
             act = act_in.selectedItem.name if act_in and act_in.selectedItem else ""
-            action = "odoo" if act.startswith("Send files") else "lasercam"
+            action = "odoo" if act.startswith("Send files") else ("lasercam-only" if act.startswith("Send to LaserCAM only") else "lasercam")
             files = {"dxf": bool(inputs.itemById("f_dxf").value), "step": bool(inputs.itemById("f_step").value), "cad": bool(inputs.itemById("f_cad").value)}
             if action == "odoo" and not any(files.values()):
                 err("Tick at least one file to send.")
                 return
             s = _pending["s"]
             s["SEND_MODE"] = action
-            s["ATTACH_DXF"], s["ATTACH_STEP"], s["ATTACH_CAD"] = files["dxf"], files["step"], files["cad"]
+            if action != "lasercam-only":
+                s["ATTACH_DXF"], s["ATTACH_STEP"], s["ATTACH_CAD"] = files["dxf"], files["step"], files["cad"]
             try:
                 save_settings(s)
             except Exception:
                 pass
+            if action == "lasercam-only":
+                # "LaserCAM only" in the Send dialog: no product is picked or created, nothing is read from or written
+                # to Odoo from here on - the same path as with empty Odoo settings.
+                _pending["odoo"] = False
+                send_to_odoo(None, _pending)
+                return
             pick = {"mode": mode, "pid": 0, "tmpl": 0, "code": "", "action": action, "files": files}
             if mode in ("product", "template"):
                 table = inputs.itemById("products")
@@ -1089,6 +1155,24 @@ class SendCreatedHandler(adsk.core.CommandCreatedEventHandler):
             cmd = args.command
             _pending.clear()
             s = load_settings()
+            if odoo_blank(s):
+                # LaserCAM only (no Odoo settings): no product list, no Part Number question - with no command
+                # inputs Fusion runs the execute handler straight away.
+                if not lasercam_key_set(s):
+                    not_set_up()
+                    return
+                design = get_design()
+                if not design:
+                    return
+                comp, body = find_sheet_metal(design)
+                if not comp:
+                    return
+                _pending.update({"s": s, "design": design, "comp": comp, "body": body, "title": clean_title(comp.name),
+                                 "number": part_label(comp), "odoo": False})
+                h = SendExecuteHandler()
+                cmd.execute.add(h)
+                _handlers.append(h)
+                return
             if not odoo_ready(s):
                 return
             design = get_design()
@@ -1113,9 +1197,10 @@ class SendCreatedHandler(adsk.core.CommandCreatedEventHandler):
             cmd.setDialogMinimumSize(720, 560)
             inputs = cmd.commandInputs
             action = inputs.addRadioButtonGroupCommandInput("action", "What to do")
-            direct = (s.get("SEND_MODE") == "odoo")
-            action.listItems.add("Send to LaserCAM: nesting, weight and time; \"Save to Odoo\" there", not direct)
-            action.listItems.add("Send files straight to the Odoo product (no nesting)", direct)
+            last = s.get("SEND_MODE")
+            action.listItems.add("Send to LaserCAM only: nesting, weight and time (no Odoo product, nothing saved to Odoo)", last == "lasercam-only")
+            action.listItems.add("Send to LaserCAM and Odoo: nesting, weight and time; \"Save to Odoo\" there", last not in ("lasercam-only", "odoo"))
+            action.listItems.add("Send files straight to the Odoo product (no nesting)", last == "odoo")
             inputs.addBoolValueInput("f_dxf", "DXF flat pattern (direct send)", True, "", bool(s.get("ATTACH_DXF", True)))
             inputs.addBoolValueInput("f_step", "STEP (direct send)", True, "", bool(s.get("ATTACH_STEP", True)))
             inputs.addBoolValueInput("f_cad", "Fusion archive .f3d (direct send)", True, "", bool(s.get("ATTACH_CAD", True)))
@@ -1274,9 +1359,10 @@ def run(context):
             if old:
                 old.deleteMe()
         send_def = defs.addButtonDefinition(
-            CMD_SEND_ID, "Send to Odoo",
+            CMD_SEND_ID, "Send to LaserCAM",
             "LaserCAM: export the sheet metal flat pattern DXF, find/create the Odoo product by Part Number "
-            "and open LaserCAM (or quote silently) - see LaserCAM Settings.", RESOURCES)
+            "and open LaserCAM (or quote silently) - see LaserCAM Settings. "
+            "Without Odoo settings the flat pattern goes to LaserCAM only.", RESOURCES)
         settings_def = defs.addButtonDefinition(
             CMD_SETTINGS_ID, "LaserCAM Settings",
             "LaserCAM / Odoo credentials, sheet size, spacing, price per kg, modes.", RESOURCES)

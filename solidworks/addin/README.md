@@ -3,7 +3,7 @@
 The same flow as the `ExportToOdoo.bas` macro, packaged as a real SolidWorks add-in:
 a **LaserCAM** tab in the CommandManager (part documents) and a **LaserCAM** menu with two buttons:
 
-- **Send to Odoo** - reads the Odoo number (custom property `Number`), finds or creates the Odoo product,
+- **Send to LaserCAM** - reads the Odoo number (custom property `Number`), finds or creates the Odoo product,
   takes material / thickness / sheet from the product's BOM sheet line (or the template product's),
   exports the flat pattern DXF, creates a LaserCAM job and opens it in the browser. "Save to Odoo" in
   LaserCAM writes weight, DXF, BOM sheet quantity, work center "Laser <code>" and the laser operation.
@@ -50,7 +50,7 @@ setup below still works.
 Run **`installer\Output\LaserCAM-SolidWorks-Setup-<version>.exe`** (close SolidWorks first, it checks).
 It copies the add-in to `C:\Program Files\LaserCAM\SolidWorks`, registers it (RegAsm + SolidWorks add-in keys,
 load at startup) and adds "LaserCAM for SolidWorks" to Programs and Features for uninstall. Then start
-SolidWorks, open a sheet metal part, click **Send to Odoo**: the first click opens the Settings dialog and asks
+SolidWorks, open a sheet metal part, click **Send to LaserCAM**: the first click opens the Settings dialog and asks
 for the LaserCAM key (LC_PID, LC_KEY) and the Odoo API key once. Done.
 
 Build the installer: install Inno Setup 6 (`winget install JRSoftware.InnoSetup`), run `build.cmd`, then
@@ -73,7 +73,21 @@ Remove: close SolidWorks, run `uninstall.cmd` as administrator, delete the folde
 ## Use
 
 Open the sheet metal part. Make sure the custom property **Number** holds the Odoo Internal Reference
-(the add-in asks for it and writes it into the part if missing). Click **Send to Odoo**.
+(the add-in asks for it and writes it into the part if missing). Click **Send to LaserCAM**.
+
+**Read data...** (parts and assemblies) saves what SolidWorks knows exactly into a JSON file you choose: Hole Wizard
+holes (thread or plain hole, size, tap drill, countersink / counterbore, hole count), cosmetic threads, sheet metal
+thickness and K-factor, every bend (edge flange, sketched bend, jog, flat-pattern bends), weld beads, cut-list
+properties, custom properties, configurations, material, mass and, for an assembly, the component tree with each
+referenced part. Nothing is guessed from geometry. Raw API units: metres and radians. Source: `src/Inspector.cs`.
+
+Without Odoo (LaserCAM only), two ways. (1) Odoo is set up, but this part should go to LaserCAM only: in
+the Send dialog choose **Send to LaserCAM only** under "What to do" - no product row has to be picked, no
+product is created, nothing is saved to Odoo; the choice is remembered. (2) No Odoo at all: leave
+`ODOO_URL` and `ODOO_API_KEY` both empty and fill in `LC_PID` +
+`LC_KEY`. The flat pattern then goes straight to LaserCAM: no product list, the **Number** property is
+optional (the file name is used when it is missing), thickness and material come from SolidWorks, and
+nothing is read from or written to Odoo.
 
 - The product is found by Internal Reference. Then (always, or only when not found - setting
   `ALWAYS_PICK_PRODUCT`) the Odoo product list opens, the same columns as the Odoo Connector: code, product, BOM,

@@ -25,7 +25,7 @@ namespace LaserCAM.SolidWorks
             { "TEMPLATE_NUMBER", "Product whose BOM sheet is used when the part has no BOM" },
             { "USE_ODOO_SHEET", "Material / thickness / sheet from the Odoo BOM sheet line" },
             { "ALWAYS_PICK_PRODUCT", "(not used since 1.0.9 - the Send dialog always opens)" },
-            { "SEND_MODE", "Last choice in the Send dialog: lasercam | odoo" },
+            { "SEND_MODE", "Last choice in the Send dialog: lasercam-only | lasercam | odoo" },
             { "ATTACH_DXF", "Send dialog default: DXF flat pattern" },
             { "ATTACH_STEP", "Send dialog default: STEP export" },
             { "ATTACH_PDF", "Send dialog default: drawing (<part>.SLDDRW) as PDF" },
@@ -85,7 +85,8 @@ namespace LaserCAM.SolidWorks
             var path = new Label { Text = "File: " + Settings.Path, Dock = DockStyle.Bottom, ForeColor = SystemColors.GrayText, Padding = new Padding(10, 0, 0, 0), Height = 20 };
             Controls.Add(grid); Controls.Add(path); Controls.Add(buttons);
             AcceptButton = ok; CancelButton = cancel;
-            ClientSize = new Size(640, grid.PreferredSize.Height + 75);
+            // Wide enough for all three columns: at 640 the help text on the right was cut off and the window cannot be resized.
+            ClientSize = new Size(Math.Max(640, grid.PreferredSize.Width), grid.PreferredSize.Height + 75);
         }
 
         Settings Read(Settings orig)

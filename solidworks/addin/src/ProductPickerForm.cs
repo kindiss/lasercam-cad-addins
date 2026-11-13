@@ -1,5 +1,6 @@
 // The "Send" dialog of the SolidWorks add-in (opens on every click):
-//   1. Action: send to LaserCAM (nesting; "Save to Odoo" there)  OR  send files straight to the Odoo product.
+//   1. Action: send to LaserCAM only (no Odoo product)  OR  send to LaserCAM and Odoo (nesting; "Save to Odoo" there)
+//      OR  send files straight to the Odoo product.
 //   2. Files for the direct send: DXF flat pattern, STEP, PDF (drawing <part>.SLDDRW), CAD file (.SLDPRT).
 //   3. Odoo product list (same columns as the Odoo Connector) and what the selected row is:
 //      this product (update it) / a template for a new product / ignore (new product without template).
@@ -14,13 +15,16 @@ using System.Windows.Forms;
 namespace LaserCAM.SolidWorks
 {
     public enum PickMode { Cancel, Product, Template, NewProduct }
-    public enum SendAction { LaserCAM, OdooFiles }
+    /// LaserCAM = nest in LaserCAM and save to the Odoo product; OdooFiles = files straight to the Odoo product;
+    /// LaserCamOnly = nest in LaserCAM, no Odoo product at all (the Odoo settings may stay filled in).
+    public enum SendAction { LaserCAM, OdooFiles, LaserCamOnly }
 
     public class ProductPickerForm : Form
     {
         readonly OdooClient _odoo;
         readonly int _preselectProductId;
-        readonly RadioButton _actLaser = new RadioButton { Text = "Send to LaserCAM: nesting, weight and time; \"Save to Odoo\" there", AutoSize = true };
+        readonly RadioButton _actOnly = new RadioButton { Text = "Send to LaserCAM only: nesting, weight and time (no Odoo product, nothing saved to Odoo)", AutoSize = true };
+        readonly RadioButton _actLaser = new RadioButton { Text = "Send to LaserCAM and Odoo: nesting, weight and time; \"Save to Odoo\" there", AutoSize = true };
         readonly RadioButton _actOdoo = new RadioButton { Text = "Send files straight to the Odoo product (no nesting)", AutoSize = true };
         readonly CheckBox _fDxf = new CheckBox { Text = "DXF flat pattern", AutoSize = true };
         readonly CheckBox _fStep = new CheckBox { Text = "STEP", AutoSize = true };
@@ -32,7 +36,8 @@ namespace LaserCAM.SolidWorks
         readonly RadioButton _rowProduct = new RadioButton { Text = "the selected row IS this part (update it; its reference goes into the part's Number)", AutoSize = true, Checked = true };
         readonly RadioButton _rowTemplate = new RadioButton { Text = "the selected row is a TEMPLATE: create a new product, take material / thickness / sheet from its BOM", AutoSize = true };
         readonly RadioButton _rowNew = new RadioButton { Text = "ignore the list: new product without a template", AutoSize = true };
-        readonly Button _ok = new Button { Text = "Send", Width = 120, Height = 30 };
+        // AutoSize: at larger Windows text sizes a fixed 120 px cut "Send to LaserCAM" off.
+        readonly Button _ok = new Button { Text = "Send", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowOnly, MinimumSize = new Size(120, 30), Padding = new Padding(8, 0, 8, 0) };
         readonly Button _cancel = new Button { Text = "Cancel", Width = 90, Height = 30, DialogResult = DialogResult.Cancel };
         readonly Label _status = new Label { Dock = DockStyle.Bottom, Height = 22, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(8, 0, 0, 0) };
 
@@ -61,7 +66,7 @@ namespace LaserCAM.SolidWorks
             var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, Padding = new Padding(10, 8, 10, 0) };
             var actBox = new GroupBox { Text = "What to do", AutoSize = true, Dock = DockStyle.Top, Padding = new Padding(10, 4, 10, 6) };
             var actFlow = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
-            actFlow.Controls.AddRange(new Control[] { _actLaser, _actOdoo });
+            actFlow.Controls.AddRange(new Control[] { _actOnly, _actLaser, _actOdoo });
             actBox.Controls.Add(actFlow);
             var fileBox = new GroupBox { Text = "Files to attach to the Odoo product (direct send)", AutoSize = true, Dock = DockStyle.Top, Padding = new Padding(10, 4, 10, 6) };
             var fileFlow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
@@ -89,10 +94,17 @@ namespace LaserCAM.SolidWorks
             AcceptButton = _ok; CancelButton = _cancel;
 
             // defaults from settings (remembered from the last send)
-            if (s.SEND_MODE == "odoo") _actOdoo.Checked = true; else _actLaser.Checked = true;
+            if (s.SEND_MODE == "odoo") _actOdoo.Checked = true; else if (s.SEND_MODE == "lasercam-only") _actOnly.Checked = true; else _actLaser.Checked = true;
             _fDxf.Checked = s.ATTACH_DXF; _fStep.Checked = s.ATTACH_STEP; _fPdf.Checked = s.ATTACH_PDF; _fCad.Checked = s.ATTACH_CAD;
-            EventHandler sync = (o, e) => { bool d = _actOdoo.Checked; foreach (var c in new[] { _fDxf, _fStep, _fPdf, _fCad }) c.Enabled = d; _ok.Text = d ? "Send files to Odoo" : "Send to LaserCAM"; };
-            _actLaser.CheckedChanged += sync; _actOdoo.CheckedChanged += sync; sync(null, null);
+            EventHandler sync = (o, e) =>
+            {
+                bool d = _actOdoo.Checked, only = _actOnly.Checked;
+                foreach (var c in new[] { _fDxf, _fStep, _fPdf, _fCad }) c.Enabled = d;
+                // LaserCAM only: the Odoo product is not needed, so the list and its options are greyed out.
+                foreach (var c in new Control[] { hint, _search, _btnSearch, _list, _rowProduct, _rowTemplate, _rowNew }) c.Enabled = !only;
+                _ok.Text = d ? "Send files to Odoo" : "Send to LaserCAM";
+            };
+            _actOnly.CheckedChanged += sync; _actLaser.CheckedChanged += sync; _actOdoo.CheckedChanged += sync; sync(null, null);
 
             _search.Text = Seed(number);
             _btnSearch.Click += (o, e) => { var _ = Load(); };
@@ -110,6 +122,14 @@ namespace LaserCAM.SolidWorks
 
         void Finish()
         {
+            if (_actOnly.Checked)
+            {
+                // No Odoo product is picked or created; Mode only has to differ from Cancel.
+                Action = SendAction.LaserCamOnly; Mode = PickMode.NewProduct;
+                DialogResult = DialogResult.OK;
+                Close();
+                return;
+            }
             Action = _actOdoo.Checked ? SendAction.OdooFiles : SendAction.LaserCAM;
             SendDxf = _fDxf.Checked; SendStep = _fStep.Checked; SendPdf = _fPdf.Checked; SendCad = _fCad.Checked;
             if (Action == SendAction.OdooFiles && !(SendDxf || SendStep || SendPdf || SendCad)) { MessageBox.Show("Tick at least one file to send.", AddIn.Title, MessageBoxButtons.OK, MessageBoxIcon.Information); return; }

@@ -1,4 +1,4 @@
-// LaserCAM SolidWorks add-in: "Send to Odoo" + "Settings" buttons (CommandManager tab + menu).
+// LaserCAM SolidWorks add-in: "Send to LaserCAM" + "Settings" buttons (CommandManager tab + menu).
 // Works with SolidWorks 2016 and newer (compiled against the 2016 interop assemblies with embedded types).
 using System;
 using System.IO;
@@ -22,6 +22,7 @@ namespace LaserCAM.SolidWorks
         const int CMD_GROUP_ID = 7391;      // unique per add-in
         const int CMD_SEND = 0;
         const int CMD_SETTINGS = 1;
+        const int CMD_READ = 2;
 
         ISldWorks _sw;
         int _cookie;
@@ -89,17 +90,25 @@ namespace LaserCAM.SolidWorks
 
             Log.Write("icons set");
             int menuToolbar = (int)(swCommandItemType_e.swMenuItem | swCommandItemType_e.swToolbarItem);
-            int idxSend = _cmdGroup.AddCommandItem2("Send to Odoo", -1, "Export the flat pattern and send it to LaserCAM and Odoo", "Send to Odoo", 0, "OnSendToOdoo", "OnEnableSend", CMD_SEND, menuToolbar);
+            int idxSend = _cmdGroup.AddCommandItem2("Send to LaserCAM", -1, "Export the flat pattern and send it to LaserCAM and Odoo", "Send to LaserCAM", 0, "OnSendToOdoo", "OnEnableSend", CMD_SEND, menuToolbar);
             int idxSettings = _cmdGroup.AddCommandItem2("Settings...", -1, "LaserCAM settings (keys, Odoo, sheet defaults)", "Settings", 1, "OnSettings", "OnEnableAlways", CMD_SETTINGS, menuToolbar);
+            // Reads what SolidWorks knows exactly (threads, countersinks, every bend, welds, properties, assembly tree) into a JSON file.
+            int idxRead = _cmdGroup.AddCommandItem2("Read data...", -1, "Save the exact part / assembly data (threads, bends, holes, properties, tree) to a file", "Read data", 0, "OnReadData", "OnEnableRead", CMD_READ, menuToolbar);
             Log.Write("items added");
             _cmdGroup.HasToolbar = true;
             _cmdGroup.HasMenu = true;
             _cmdGroup.Activate();
             Log.Write("group activated");
 
-            // CommandManager tab "LaserCAM" in part documents
-            int docType = (int)swDocumentTypes_e.swDocPART;
-            Log.Write("GetCommandTab");
+            // CommandManager tab "LaserCAM": all buttons in part documents; in assemblies "Read data" and "Settings"
+            // (sending an assembly is not built yet).
+            AddTab((int)swDocumentTypes_e.swDocPART, new[] { idxSend, idxRead, idxSettings });
+            AddTab((int)swDocumentTypes_e.swDocASSEMBLY, new[] { idxRead, idxSettings });
+        }
+
+        void AddTab(int docType, int[] items)
+        {
+            Log.Write("GetCommandTab " + docType);
             ICommandTab tab = _cmdMgr.GetCommandTab(docType, Title);
             if (tab != null)
             {
@@ -108,15 +117,17 @@ namespace LaserCAM.SolidWorks
                 tab = null;
             }
             tab = _cmdMgr.AddCommandTab(docType, Title);
-            if (tab != null)
+            if (tab == null) return;
+            ICommandTabBox box = tab.AddCommandTabBox();
+            int[] ids = new int[items.Length];
+            int[] textTypes = new int[items.Length];
+            for (int i = 0; i < items.Length; i++)
             {
-                ICommandTabBox box = tab.AddCommandTabBox();
-                int[] ids = { _cmdGroup.get_CommandID(idxSend), _cmdGroup.get_CommandID(idxSettings) };
-                int below = (int)swCommandTabButtonTextDisplay_e.swCommandTabButton_TextBelow;
-                int[] textTypes = { below, below };
-                box.AddCommands(ids, textTypes);
-                Log.Write("tab commands added");
+                ids[i] = _cmdGroup.get_CommandID(items[i]);
+                textTypes[i] = (int)swCommandTabButtonTextDisplay_e.swCommandTabButton_TextBelow;
             }
+            box.AddCommands(ids, textTypes);
+            Log.Write("tab commands added " + docType);
         }
 
         // Callbacks (must be public; names are passed as strings to AddCommandItem2)
@@ -126,10 +137,10 @@ namespace LaserCAM.SolidWorks
             {
                 var model = _sw.ActiveDoc as IModelDoc2;
                 var settings = Settings.Load();
-                if (string.IsNullOrEmpty(settings.ODOO_API_KEY))
+                if (string.IsNullOrEmpty(settings.ODOO_API_KEY) && string.IsNullOrEmpty(settings.LC_KEY))
                 {
-                    // First use: the Odoo API key is needed for everything; the LaserCAM key only for nesting (Basic plan).
-                    MessageBox.Show("Welcome to LaserCAM. Fill in your Odoo API key once (stored on this PC only). The LaserCAM key (LC_PID, LC_KEY) is needed only for sending to LaserCAM - nesting, weight and time (Basic plan); sending files straight to Odoo is free.", Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    // First use, nothing filled in. With only the LaserCAM key the add-in works without Odoo (Exporter.Run).
+                    MessageBox.Show("Welcome to LaserCAM. Fill in the settings once (stored on this PC only), one of two ways:\n\n1. LaserCAM only (no Odoo): LC_PID and LC_KEY - nesting, weight and time in LaserCAM (Basic plan).\n\n2. With Odoo: ODOO_URL and ODOO_API_KEY; add LC_PID and LC_KEY too for nesting. Sending files straight to Odoo is free.", Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     using (var f = new SettingsForm(settings))
                     {
                         if (f.ShowDialog() != DialogResult.OK) return;
@@ -171,6 +182,41 @@ namespace LaserCAM.SolidWorks
         }
 
         public int OnEnableAlways() { return 1; }
+
+        /// "Read data": the exact part / assembly data as SolidWorks knows it, saved to a JSON file the user chooses.
+        public void OnReadData()
+        {
+            try
+            {
+                var model = _sw.ActiveDoc as IModelDoc2;
+                if (model == null) { MessageBox.Show("Open a part or an assembly first.", Title, MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+                var inspector = new Inspector(_sw);
+                string json = inspector.Run(model);
+                string name = System.Text.RegularExpressions.Regex.Replace(Path.GetFileNameWithoutExtension(model.GetTitle() ?? "model"), @"[\\/:*?""<>|]", "_");
+                using (var dlg = new SaveFileDialog { Title = "LaserCAM - save the data file", Filter = "JSON (*.json)|*.json", FileName = "lasercam-data-" + name + ".json", OverwritePrompt = true })
+                {
+                    if (dlg.ShowDialog() != DialogResult.OK) return;
+                    File.WriteAllText(dlg.FileName, json, new System.Text.UTF8Encoding(false));
+                    MessageBox.Show("Saved (" + inspector.FeatureCount + " features):\n" + dlg.FileName, Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message + "\n\n" + ex.StackTrace, Title + " - error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        public int OnEnableRead()
+        {
+            try
+            {
+                var model = _sw.ActiveDoc as IModelDoc2;
+                if (model == null) return 0;
+                int t = model.GetType();
+                return (t == (int)swDocumentTypes_e.swDocPART || t == (int)swDocumentTypes_e.swDocASSEMBLY) ? 1 : 0;
+            }
+            catch { return 0; }
+        }
 
         // ---------------- COM registration (regasm /codebase) ----------------
         [ComRegisterFunction]

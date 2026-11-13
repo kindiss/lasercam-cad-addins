@@ -1,4 +1,4 @@
-// "Send to Odoo" flow - a one-to-one port of the ExportToOdoo.bas macro Main().
+// "Send to LaserCAM" flow - a one-to-one port of the ExportToOdoo.bas macro Main().
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -23,6 +23,8 @@ namespace LaserCAM.SolidWorks
         // Odoo BOM sheet line (e.g. "[00002] Lakstas DC01 3x1250x2500")
         string _sheetName = ""; double _sheetThick, _sheetW, _sheetH; int _sheetProductId;
         int _tmpl;
+        bool _useOdoo = true;   // false: LaserCAM only (the Odoo address and key are both empty, or "LaserCAM only" chosen in the Send dialog)
+        bool LcKeySet { get { return !string.IsNullOrEmpty(_s.LC_KEY) && !string.IsNullOrEmpty(_s.LC_PID) && _s.LC_PID != "0"; } }
 
         static readonly Regex SheetRe = new Regex(@"(\d+(?:[.,]\d+)?)\s*[xX*]\s*(\d+(?:[.,]\d+)?)\s*[xX*]\s*(\d+(?:[.,]\d+)?)");
 
@@ -46,7 +48,18 @@ namespace LaserCAM.SolidWorks
         {
             if (model == null) { Ask("Open a sheet metal part first.", MessageBoxButtons.OK, MessageBoxIcon.Exclamation); return; }
             if (model.GetType() != (int)swDocumentTypes_e.swDocPART) { Ask("The active document is not a part.", MessageBoxButtons.OK, MessageBoxIcon.Exclamation); return; }
-            if (string.IsNullOrEmpty((_s.ODOO_URL ?? "").Trim()) || string.IsNullOrEmpty((_s.ODOO_API_KEY ?? "").Trim()))
+            // No Odoo address and no Odoo key = LaserCAM only: no product list, nothing read from or written to Odoo.
+            _useOdoo = !(string.IsNullOrEmpty((_s.ODOO_URL ?? "").Trim()) && string.IsNullOrEmpty((_s.ODOO_API_KEY ?? "").Trim()));
+            if (!_useOdoo && !LcKeySet)
+            {
+                Ask("LaserCAM is not set up yet. Fill in the LaserCAM settings one of two ways:\n\n"
+                    + "1. LaserCAM only (no Odoo): LC_PID and LC_KEY - your LaserCAM key from laser.ucase.eu (Basic plan). The flat pattern opens in LaserCAM for nesting.\n\n"
+                    + "2. With Odoo: ODOO_URL and ODOO_API_KEY (in Odoo: My profile > Account security > New API key). Add LC_PID and LC_KEY too if you want nesting, weight and time in LaserCAM.\n\n"
+                    + "The settings window opens now; after saving, click Send to LaserCAM again.", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                using (var f = new SettingsForm(_s)) { if (f.ShowDialog() == DialogResult.OK) f.Result.Save(); }
+                return;
+            }
+            if (_useOdoo &&(string.IsNullOrEmpty((_s.ODOO_URL ?? "").Trim()) || string.IsNullOrEmpty((_s.ODOO_API_KEY ?? "").Trim())))
             {
                 // first run without the Odoo address / key: explain what is needed and open Settings (no bare HTTP 401 later)
                 Ask("LaserCAM is not connected to Odoo yet - " + (string.IsNullOrEmpty((_s.ODOO_URL ?? "").Trim()) ? "the Odoo address (ODOO_URL)" : "the Odoo API key (ODOO_API_KEY)") + " is missing.\n\n"
@@ -54,8 +67,9 @@ namespace LaserCAM.SolidWorks
                     + "- ODOO_URL: your Odoo address, e.g. https://company.odoo.com\n"
                     + "- ODOO_API_KEY: in Odoo open My profile > Account security > New API key, copy it once and paste it here (keys are stored encrypted and cannot be viewed again)\n"
                     + "- ODOO_DB: only for on-premise Odoo with several databases\n\n"
-                    + "The settings window opens now; after saving, click Send to Odoo again.", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                using (var f = new SettingsForm(_s)) f.ShowDialog();
+                    + "With both filled in you can still send to LaserCAM only - it is a choice in the Send dialog.\n\n"
+                    + "The settings window opens now; after saving, click Send to LaserCAM again.", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                using (var f = new SettingsForm(_s)) { if (f.ShowDialog() == DialogResult.OK) f.Result.Save(); }
                 return;
             }
             using (var prog = new ProgressForm("LaserCAM - sending " + CleanTitle(model.GetTitle())))
@@ -73,6 +87,7 @@ namespace LaserCAM.SolidWorks
             string title = CleanTitle(model.GetTitle());
             string number = CustomProp(model, _s.NUMBER_PROPERTY);
             if (number == "False" || number == "false") number = "";   // 1.0.6 wrote Odoo's empty code as "False"
+            if (number == "" && !_useOdoo) number = title != "" ? title : "part";   // without Odoo the number is not needed: the file name will do
             if (number == "")
             {
                 number = Prompt("The part has no custom property \"" + _s.NUMBER_PROPERTY + "\". Enter the Odoo number (Internal Reference):", "");
@@ -82,13 +97,16 @@ namespace LaserCAM.SolidWorks
             double swThick = SheetThickness(model);
 
             // Odoo product first: its BOM sheet line (or the template product's) defines material + thickness + sheet.
-            prog.Step(10, "Looking up the Odoo product " + number + "...");
-            int pid = OdooFindProduct(number);
+            int pid = 0;
             bool created = false;
             int templateTmpl = 0;   // chosen TEMPLATE product (template id): its BOM sheet gives material/thickness/sheet
-            SendAction action;
-            bool fDxf, fStep, fPdf, fCad;
-            // The Send dialog (always): what to do + files + the Odoo product / template list.
+            SendAction action = SendAction.LaserCAM;
+            bool fDxf = false, fStep = false, fPdf = false, fCad = false;
+            // The Send dialog (always with Odoo): what to do + files + the Odoo product / template list.
+            if (_useOdoo)
+            {
+            prog.Step(10, "Looking up the Odoo product " + number + "...");
+            pid = OdooFindProduct(number);
             using (var pick = new ProductPickerForm(_odoo, _s, number, title, pid))
             {
                 prog.Hide();
@@ -96,10 +114,16 @@ namespace LaserCAM.SolidWorks
                 if (dr != DialogResult.OK || pick.Mode == PickMode.Cancel) return;
                 prog.Step(20, "Odoo product chosen...");
                 action = pick.Action; fDxf = pick.SendDxf; fStep = pick.SendStep; fPdf = pick.SendPdf; fCad = pick.SendCad;
-                _s.SEND_MODE = action == SendAction.OdooFiles ? "odoo" : "lasercam";
-                _s.ATTACH_DXF = fDxf; _s.ATTACH_STEP = fStep; _s.ATTACH_PDF = fPdf; _s.ATTACH_CAD = fCad;
+                _s.SEND_MODE = action == SendAction.OdooFiles ? "odoo" : action == SendAction.LaserCamOnly ? "lasercam-only" : "lasercam";
+                if (action != SendAction.LaserCamOnly) { _s.ATTACH_DXF = fDxf; _s.ATTACH_STEP = fStep; _s.ATTACH_PDF = fPdf; _s.ATTACH_CAD = fCad; }
                 try { _s.Save(); } catch { }
-                if (pick.Mode == PickMode.Product)
+                if (action == SendAction.LaserCamOnly)
+                {
+                    // "LaserCAM only" in the Send dialog: no product is picked or created, and from here on nothing is
+                    // read from or written to Odoo - the same path as with empty Odoo settings.
+                    _useOdoo = false; pid = 0;
+                }
+                else if (pick.Mode == PickMode.Product)
                 {
                     pid = pick.ProductId;
                     _tmpl = pick.TemplateId;
@@ -115,8 +139,12 @@ namespace LaserCAM.SolidWorks
                     if (pid == 0) { pid = OdooCreateProduct(number, title); created = true; }
                 }
             }
-            if (pid == 0) { Err("Could not find or create the Odoo product."); return; }
-            if (_tmpl == 0) _tmpl = OdooTemplateOf(pid);
+            if (_useOdoo)
+            {
+                if (pid == 0) { Err("Could not find or create the Odoo product."); return; }
+                if (_tmpl == 0) _tmpl = OdooTemplateOf(pid);
+            }
+            }
             if (action == SendAction.OdooFiles)
             {
                 // Direct send: export the ticked files and attach them to the product. No nesting, no LaserCAM job.
@@ -125,16 +153,16 @@ namespace LaserCAM.SolidWorks
                 Info("Odoo product " + (created ? "CREATED" : "updated") + ": " + number + "\n\nAttached: " + (attachedDirect == "" ? "nothing (no file could be exported)" : attachedDirect), "LaserCAM -> Odoo");
                 return;
             }
-            if (string.IsNullOrEmpty(_s.LC_KEY) || _s.LC_PID == "0" || string.IsNullOrEmpty(_s.LC_PID))
+            if (!LcKeySet)
             {
                 prog.Hide();
                 MessageBox.Show(Owner, "Sending to LaserCAM (nesting, weight, time) needs your LaserCAM key: Settings -> LC_PID and LC_KEY (Basic plan, laser.ucase.eu). Sending files straight to the Odoo product works without it.", AddIn.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            prog.Step(25, "Reading the Odoo bill of materials (sheet)...");
             string sheetSource = "";
-            if (_s.USE_ODOO_SHEET)
+            if (_useOdoo && _s.USE_ODOO_SHEET)
             {
+                prog.Step(25, "Reading the Odoo bill of materials (sheet)...");
                 if (OdooSheetOf(_tmpl)) sheetSource = "product BOM";
                 else if (templateTmpl > 0 && OdooSheetOf(templateTmpl)) sheetSource = "chosen template";
                 else if (_s.TEMPLATE_NUMBER != "")
@@ -189,8 +217,8 @@ namespace LaserCAM.SolidWorks
             {
                 { "id", number }, { "name", title }, { "dxf", dxf }, { "quantity", _s.QUANTITY },
                 { "thicknessMm", thick }, { "material", material }, { "gas", gas },
-                { "odooProductId", pid },   // the product is already known: the server updates it by id, never by name
             };
+            if (_useOdoo) part["odooProductId"] = pid;   // the product is already known: the server updates it by id, never by name
             var body = new Dictionary<string, object>
             {
                 { "parts", new object[] { part } },
@@ -202,7 +230,7 @@ namespace LaserCAM.SolidWorks
             {
                 body["number"] = number;
                 body["source"] = "SolidWorks";
-                if (_s.SEND_ODOO_FROM_APP)
+                if (_useOdoo && _s.SEND_ODOO_FROM_APP)
                 {
                     var od = new Dictionary<string, object> { { "url", _s.ODOO_URL }, { "apiKey", _s.ODOO_API_KEY } };
                     if (_s.ODOO_DB != "") od["db"] = _s.ODOO_DB;
@@ -220,8 +248,9 @@ namespace LaserCAM.SolidWorks
                 if (!_s.WAIT_FOR_RESULT)
                 {
                     Info("LaserCAM opened in the browser with " + number + " (" + material + ", " + Json.NumStr(thick) + " mm, sheet " + Json.NumStr(shW) + " x " + Json.NumStr(shH) + ").\n\n" +
-                         (_s.SEND_ODOO_FROM_APP ? "Nest it there and click \"Save to Odoo\" - weight, DXF, BOM sheet quantity and laser time go straight to Odoo."
-                                               : "Nest it there and click \"Send result to SolidWorks\", then run Send to Odoo again with WAIT_FOR_RESULT on to copy the numbers into the part."));
+                         (!_useOdoo ? "Nest it there, then download the cutting file (DXF) or the PDF report."
+                          : _s.SEND_ODOO_FROM_APP ? "Nest it there and click \"Save to Odoo\" - weight, DXF, BOM sheet quantity and laser time go straight to Odoo."
+                                               : "Nest it there and click \"Send result to SolidWorks\", then run Send to LaserCAM again with WAIT_FOR_RESULT on to copy the numbers into the part."));
                     return;
                 }
                 var t0 = DateTime.Now;
@@ -231,7 +260,7 @@ namespace LaserCAM.SolidWorks
                     Application.DoEvents();
                     resp = _lc.GetResult(jobId);
                     if (resp != null) break;
-                    if ((DateTime.Now - t0).TotalMinutes > _s.APP_WAIT_MIN) { Ask("No result from LaserCAM after " + _s.APP_WAIT_MIN + " minutes. Run Send to Odoo again when the nesting is done.", MessageBoxButtons.OK, MessageBoxIcon.Exclamation); return; }
+                    if ((DateTime.Now - t0).TotalMinutes > _s.APP_WAIT_MIN) { Ask("No result from LaserCAM after " + _s.APP_WAIT_MIN + " minutes. Run Send to LaserCAM again when the nesting is done.", MessageBoxButtons.OK, MessageBoxIcon.Exclamation); return; }
                 }
             }
             else
@@ -251,7 +280,7 @@ namespace LaserCAM.SolidWorks
 
             // 3. Odoo: write results (skipped when LaserCAM already saved to Odoo itself)
             bool odooByApp = _s.OPEN_APP && resp.ContainsKey("odooDone") && resp["odooDone"] != null;
-            if (!odooByApp)
+            if (_useOdoo && !odooByApp)
             {
                 _odoo.Write("product.product", pid, new Dictionary<string, object> { { "weight", Math.Round(netKg, 4) } });
                 var quote = new Dictionary<string, object>
@@ -277,7 +306,7 @@ namespace LaserCAM.SolidWorks
             SetCustomProp(model, "LC_CutSec", Json.NumStr(secs));
             SetCustomProp(model, "LC_Price", Json.NumStr(price));
 
-            Info("Odoo product " + (created ? "CREATED" : "updated") + (odooByApp ? " (by LaserCAM)" : "") + ": " + number + "\n\n" +
+            Info((!_useOdoo ? "LaserCAM quote" : "Odoo product " + (created ? "CREATED" : "updated") + (odooByApp ? " (by LaserCAM)" : "")) + ": " + number + "\n\n" +
                  "Thickness " + Json.NumStr(thick) + " mm, " + material + ", " + gas + "  [" + sheetSource + "]\n" +
                  "Sheet " + Json.NumStr(shW) + " x " + Json.NumStr(shH) + " mm\n" +
                  "Net weight: " + Json.NumStr(netKg) + " kg\n" +
@@ -286,7 +315,7 @@ namespace LaserCAM.SolidWorks
                  "Price: " + Json.NumStr(price) + " EUR\n" +
                  "Parts per sheet: " + Json.NumStr(perSheet) + " (" + algo + ")" +
                  (warnTail != "" ? "\n" + warnTail : "") +
-                 (warn != "" ? "\n\nWarning: " + warn : ""), "LaserCAM -> Odoo");
+                 (warn != "" ? "\n\nWarning: " + warn : ""), _useOdoo ? "LaserCAM -> Odoo" : "LaserCAM");
         }
 
         // ---------------- attachments: part file, STEP, drawing PDF -> Odoo product ----------------

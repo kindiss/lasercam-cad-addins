@@ -1,4 +1,4 @@
-# LaserCAM -> Autodesk Fusion: "Send to Odoo" (Python add-in)
+# LaserCAM -> Autodesk Fusion: "Send to LaserCAM" (Python add-in)
 
 One click on the active sheet metal component: flat pattern DXF -> LaserCAM (job in the browser, or
 silent `/api/quote` with weight, time, price from YOUR account database) -> Odoo product by number
@@ -11,7 +11,7 @@ Folder `fusion/LaserCAM/`:
 
 | File | What |
 |---|---|
-| `LaserCAM.py` | the add-in (two commands: "Send to Odoo", "LaserCAM Settings") |
+| `LaserCAM.py` | the add-in (two commands: "Send to LaserCAM", "LaserCAM Settings") |
 | `LaserCAM.manifest` | Fusion add-in manifest (runs on startup) |
 | `resources/16x16.png`, `32x32.png` (+ `@2x`) | button icons |
 
@@ -28,7 +28,7 @@ from Utilities - ADD-INS). Build it with Inno Setup 6: `ISCC.exe installer\Laser
    `~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/LaserCAM`).
 2. Fusion -> **Utilities** tab -> **ADD-INS** -> **Add-Ins** tab -> select `LaserCAM` -> **Run**.
    Tick **Run on Startup** so it loads every time.
-3. A panel **LaserCAM** with the buttons **Send to Odoo** and **LaserCAM Settings** appears on the
+3. A panel **LaserCAM** with the buttons **Send to LaserCAM** and **LaserCAM Settings** appears on the
    **SOLID** tab (and on the **SHEET METAL** tab) of the DESIGN workspace.
 4. Click **LaserCAM Settings** and fill in:
    - `LaserCAM contact id (LC_PID)` - your Odoo contact id (res.partner), the same one the LaserCAM bridge uses;
@@ -74,6 +74,23 @@ stored value. The add-in never logs or displays a key in full.
 - `OPEN_APP = false`: silent `/api/quote`, no browser, result in 5-15 s, written to Odoo by the add-in
   (weight, DXF attachment, quote summary) and shown in a message box.
 
+## Without Odoo (LaserCAM only)
+
+Two ways:
+
+1. Odoo is set up, but this part should go to LaserCAM only: in the Send dialog choose **Send to LaserCAM
+   only** under "What to do". No product row has to be picked, no product is created and nothing is saved
+   to Odoo. The choice is remembered for the next send.
+2. No Odoo at all: as below.
+
+Leave `ODOO_URL` and `ODOO_API_KEY` both empty and fill in `LC_PID` + `LC_KEY`. **Send to LaserCAM** then
+sends the flat pattern straight to LaserCAM: no product list, no Part Number question (the Part Number
+is used as the part name when it is set, otherwise the component name), thickness and material come
+from Fusion, and nothing is read from or written to Odoo. With `OPEN_APP = true` LaserCAM opens in the
+browser for nesting and file download; with `OPEN_APP = false` the quote (weight, time, price) is shown
+in a message box and stored in the component attributes. Filling in only one of the two Odoo fields is
+treated as an unfinished Odoo setup and the add-in asks for the missing one.
+
 ## Where material, thickness and sheet come from (setting `USE_ODOO_SHEET`)
 
 `true` (default): from the Odoo product's BOM sheet line (e.g. `DC01 3x1250x2500`): thickness = smallest
@@ -99,7 +116,7 @@ until a sheet is picked, then it creates the BOM (sheet line in kg per piece), t
    component name), the add-in asks for the number and writes it back into the Part Number.
 3. Nothing selected = root component. Select exactly one component (occurrence) in the browser to send
    that component instead.
-4. Click **Send to Odoo** (SOLID tab -> LaserCAM panel).
+4. Click **Send to LaserCAM** (SOLID tab -> LaserCAM panel).
    `OPEN_APP = true`: the browser opens LaserCAM with the part; nest, then click "Save to Odoo".
    `OPEN_APP = false`: after 5-15 s the message with net/gross kg, time, price, parts per sheet appears.
 
