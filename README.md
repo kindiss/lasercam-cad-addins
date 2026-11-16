@@ -55,6 +55,8 @@ Windows DPAPI for the current user. The Odoo API key travels with a LaserCAM job
 "Send to LaserCAM", is kept in server memory for at most one hour (deleted one minute after a successful
 "Save to Odoo") and is never written to disk or returned to the browser.
 
+What the add-ins store and send, in full: [PRIVACY.md](PRIVACY.md).
+
 ## License
 
 LGPL-3.0 (see `LICENSE` and `GPL-3.0.txt`). Copyright UCASE MB, Lithuania. Contact: info@ucase.eu.
