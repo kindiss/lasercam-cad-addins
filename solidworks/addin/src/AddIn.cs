@@ -92,18 +92,27 @@ namespace LaserCAM.SolidWorks
             int menuToolbar = (int)(swCommandItemType_e.swMenuItem | swCommandItemType_e.swToolbarItem);
             int idxSend = _cmdGroup.AddCommandItem2("Send to LaserCAM", -1, "Export the flat pattern and send it to LaserCAM and Odoo", "Send to LaserCAM", 0, "OnSendToOdoo", "OnEnableSend", CMD_SEND, menuToolbar);
             int idxSettings = _cmdGroup.AddCommandItem2("Settings...", -1, "LaserCAM settings (keys, Odoo, sheet defaults)", "Settings", 1, "OnSettings", "OnEnableAlways", CMD_SETTINGS, menuToolbar);
-            // Reads what SolidWorks knows exactly (threads, countersinks, every bend, welds, properties, assembly tree) into a JSON file.
-            int idxRead = _cmdGroup.AddCommandItem2("Read data...", -1, "Save the exact part / assembly data (threads, bends, holes, properties, tree) to a file", "Read data", 0, "OnReadData", "OnEnableRead", CMD_READ, menuToolbar);
-            Log.Write("items added");
+            // "Read data...": what SolidWorks knows exactly (threads, countersinks, every bend, welds, properties, assembly
+            // tree) into a JSON file. Hidden unless the setting SHOW_READ_DATA is on (owner 2026-11-20: "the button looks
+            // unnecessary - hide it"): every send carries the same data, and a copy of the last one is kept next to the log.
+            bool showRead = false;
+            try { showRead = Settings.Load().SHOW_READ_DATA; } catch { showRead = false; }
+            int idxRead = showRead
+                ? _cmdGroup.AddCommandItem2("Read data...", -1, "Save the exact part / assembly data (threads, bends, holes, properties, tree) to a file", "Read data", 0, "OnReadData", "OnEnableRead", CMD_READ, menuToolbar)
+                : -1;
+            Log.Write("items added" + (showRead ? " (with Read data)" : ""));
             _cmdGroup.HasToolbar = true;
             _cmdGroup.HasMenu = true;
             _cmdGroup.Activate();
             Log.Write("group activated");
 
-            // CommandManager tab "LaserCAM": all buttons in part documents; in assemblies "Read data" and "Settings"
-            // (sending an assembly is not built yet).
-            AddTab((int)swDocumentTypes_e.swDocPART, new[] { idxSend, idxRead, idxSettings });
-            AddTab((int)swDocumentTypes_e.swDocASSEMBLY, new[] { idxRead, idxSettings });
+            // CommandManager tab "LaserCAM": all buttons in part and assembly documents.
+            // In an assembly "Send to LaserCAM" sends the whole assembly in one step (AssemblySend.cs).
+            int[] modelItems = showRead ? new[] { idxSend, idxRead, idxSettings } : new[] { idxSend, idxSettings };
+            AddTab((int)swDocumentTypes_e.swDocPART, modelItems);
+            AddTab((int)swDocumentTypes_e.swDocASSEMBLY, modelItems);
+            // In a drawing "Send to LaserCAM" sends the part or the assembly the drawing shows.
+            AddTab((int)swDocumentTypes_e.swDocDRAWING, new[] { idxSend, idxSettings });
         }
 
         void AddTab(int docType, int[] items)
@@ -143,17 +152,32 @@ namespace LaserCAM.SolidWorks
                     MessageBox.Show("Welcome to LaserCAM. Fill in the settings once (stored on this PC only), one of two ways:\n\n1. LaserCAM only (no Odoo): LC_PID and LC_KEY - nesting, weight and time in LaserCAM (Basic plan).\n\n2. With Odoo: ODOO_URL and ODOO_API_KEY; add LC_PID and LC_KEY too for nesting. Sending files straight to Odoo is free.", Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     using (var f = new SettingsForm(settings))
                     {
-                        if (f.ShowDialog() != DialogResult.OK) return;
+                        if (Attention.ShowDialogInFront(f, Attention.MainWindowOf(_sw)) != DialogResult.OK) return;
                         settings = f.Result;
                         settings.Save();
                     }
                 }
                 new Exporter(_sw, settings).Run(model);
+                AfterCommand(settings);
             }
             catch (Exception ex)
             {
                 MessageBox.Show(ex.Message, Title + " - error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        /// After a command has finished: offer a newer add-in version if one is known (asked once per version per
+        /// week, from the saved answer - no network here), then let the daily check run on a background thread.
+        void AfterCommand(Settings s)
+        {
+            try
+            {
+                var st = s ?? Settings.Load();
+                if (!st.CHECK_UPDATES) return;       // switched off in Settings
+                UpdateCheck.Offer(null, Title);
+                UpdateCheck.RefreshInBackground(st.LC_API);
+            }
+            catch { }
         }
 
         public void OnSettings()
@@ -162,8 +186,9 @@ namespace LaserCAM.SolidWorks
             {
                 using (var f = new SettingsForm(Settings.Load()))
                 {
-                    if (f.ShowDialog() == DialogResult.OK) f.Result.Save();
+                    if (Attention.ShowDialogInFront(f, Attention.MainWindowOf(_sw)) == DialogResult.OK) f.Result.Save();
                 }
+                AfterCommand(null);
             }
             catch (Exception ex)
             {
@@ -176,7 +201,9 @@ namespace LaserCAM.SolidWorks
             try
             {
                 var model = _sw.ActiveDoc as IModelDoc2;
-                return (model != null && model.GetType() == (int)swDocumentTypes_e.swDocPART) ? 1 : 0;
+                if (model == null) return 0;
+                int t = model.GetType();
+                return (t == (int)swDocumentTypes_e.swDocPART || t == (int)swDocumentTypes_e.swDocASSEMBLY || t == (int)swDocumentTypes_e.swDocDRAWING) ? 1 : 0;
             }
             catch { return 0; }
         }
@@ -190,13 +217,17 @@ namespace LaserCAM.SolidWorks
             {
                 var model = _sw.ActiveDoc as IModelDoc2;
                 if (model == null) { MessageBox.Show("Open a part or an assembly first.", Title, MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+                ShapeReader.Reset();   // every part is measured again: it may have been edited since the last command
                 var inspector = new Inspector(_sw);
+                try { inspector.OdooCodeFrom = Inspector.CodeFromOf(Settings.Load()); } catch { /* without settings the file simply carries no choice */ }
                 string json = inspector.Run(model);
                 string name = System.Text.RegularExpressions.Regex.Replace(Path.GetFileNameWithoutExtension(model.GetTitle() ?? "model"), @"[\\/:*?""<>|]", "_");
                 using (var dlg = new SaveFileDialog { Title = "LaserCAM - save the data file", Filter = "JSON (*.json)|*.json", FileName = "lasercam-data-" + name + ".json", OverwritePrompt = true })
                 {
                     if (dlg.ShowDialog() != DialogResult.OK) return;
                     File.WriteAllText(dlg.FileName, json, new System.Text.UTF8Encoding(false));
+                    var st = Settings.Load();
+                    if (st.CHECK_UPDATES) UpdateCheck.RefreshInBackground(st.LC_API);
                     MessageBox.Show("Saved (" + inspector.FeatureCount + " features):\n" + dlg.FileName, Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
             }

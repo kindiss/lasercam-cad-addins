@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import sys
+import tempfile
 import types
 import unittest
 
@@ -96,7 +97,17 @@ class World(object):
         self.attributes = None
         self.job_status = job_status
         self.job_resp = job_resp
+        self.latest = None         # ką atsako /addins/version: (statusas, žodynas) arba None = serveris nepasiekiamas
+        self.now = 1800000000.0    # valdomas laikas (sekundės)
+        self.asked = []            # ask_yes_no klausimai
+        self.answer = True         # ką atsako naudotojas
         w = self
+        fd, self.state_path = tempfile.mkstemp(suffix=".json", prefix="lc-update-")
+        os.close(fd)
+        os.remove(self.state_path)
+        m.UPDATE_STATE_PATH = self.state_path
+        m._now = lambda: w.now
+        m._run_in_background = lambda fn: fn()
 
         m.load_settings = lambda: dict(w.settings)
         self.saved = None          # paskutinį kartą įrašyti nustatymai
@@ -104,6 +115,10 @@ class World(object):
 
         def http(method, url, body=None, headers=None, timeout=600):
             w.http_calls.append((method, url, body))
+            if url.endswith("/addins/version"):
+                if w.latest is None:
+                    return 0, "timeout"
+                return w.latest[0], json.dumps(w.latest[1])
             if url.endswith("/session"):
                 return 200, json.dumps({"token": "TOKEN"})
             if url.endswith("/job"):
@@ -122,7 +137,11 @@ class World(object):
         m.msg = lambda text, title="LaserCAM", icon=None: w.dialogs.append(("msg", text))
         m.warn = lambda text, title="LaserCAM": w.dialogs.append(("warn", text))
         m.err = lambda text, title="LaserCAM": w.dialogs.append(("err", text))
-        m.ask_yes_no = lambda text, title="LaserCAM": True
+
+        def ask_yes_no(text, title="LaserCAM"):
+            w.asked.append(text)
+            return w.answer
+        m.ask_yes_no = ask_yes_no
 
         def ask_text(prompt, default=""):
             w.prompts.append(prompt)
@@ -322,6 +341,118 @@ class WithOdoo(unittest.TestCase):
         w.confirm(both)
         self.assertIn("Select a product row", " ".join(w.texts("err")))
         self.assertEqual(w.posts("/job"), [])
+
+
+class UpdateCheck(unittest.TestCase):
+    """Priedas pasiūlo atsinaujinti, kai serveris žino naujesnę versiją. Klausia tik mūsų serverio, ne dažniau kaip kartą per parą."""
+    NEWER = (200, {"version": "99.0.0", "url": "https://github.com/kindiss/lasercam-cad-addins/releases/download/v99.0.0/LaserCAM-Setup-99.0.0.exe"})
+
+    def world(self, latest):
+        w = World(LC)
+        w.latest = latest
+        return w
+
+    def version_calls(self, w):
+        return [u for (meth, u, b) in w.http_calls if u.endswith("/addins/version")]
+
+    def test_first_command_only_checks_second_command_offers_the_download(self):
+        w = self.world(self.NEWER)
+        w.click_send()
+        self.assertEqual(len(self.version_calls(w)), 1)
+        self.assertEqual(self.version_calls(w)[0], "https://laser.ucase.eu/api/addins/version")
+        self.assertEqual(w.asked, [], "pirmą kartą tik sužinoma, klausimas - kitos komandos gale")
+        w.click_send()
+        self.assertEqual(len(w.asked), 1)
+        self.assertIn("99.0.0", w.asked[0])
+        self.assertIn(w.m.SUITE_VERSION, w.asked[0])
+        self.assertEqual(w.opened[-1], self.NEWER[1]["url"])
+        self.assertEqual(len(self.version_calls(w)), 1, "per parą serverio klausiama vieną kartą")
+
+    def test_same_or_older_version_is_never_offered(self):
+        w = self.world((200, {"version": "0.0.1", "url": "https://github.com/kindiss/lasercam-cad-addins/releases/latest"}))
+        w.click_send().click_send()
+        self.assertEqual(w.asked, [])
+        w2 = self.world((200, {"version": None}))
+        w2.click_send().click_send()
+        self.assertEqual(w2.asked, [])
+
+    def test_declined_version_is_not_asked_again_for_a_week(self):
+        w = self.world(self.NEWER)
+        w.answer = False
+        w.click_send().click_send()
+        self.assertEqual(len(w.asked), 1)
+        self.assertNotIn(self.NEWER[1]["url"], w.opened)
+        w.now += 6 * 86400
+        w.click_send()
+        self.assertEqual(len(w.asked), 1)
+        w.now += 2 * 86400
+        w.click_send()
+        self.assertEqual(len(w.asked), 2)
+
+    def test_server_down_or_old_server_changes_nothing(self):
+        for latest in (None, (404, {"error": "not found"}), (200, {"version": "bad"})):
+            w = self.world(latest)
+            w.click_send().click_send()
+            self.assertEqual(w.texts("crash") + w.texts("err"), [])
+            self.assertEqual(w.asked, [])
+            self.assertEqual(len(w.posts("/job")), 2, "siuntimas veikia kaip visada")
+
+    def test_foreign_download_address_is_replaced_by_our_releases_page(self):
+        w = self.world((200, {"version": "99.0.0", "url": "https://evil.example/setup.exe"}))
+        w.click_send().click_send()
+        self.assertEqual(w.opened[-1], "https://github.com/kindiss/lasercam-cad-addins/releases/latest")
+
+    def test_check_repeats_after_a_day(self):
+        w = self.world((200, {"version": "0.0.1", "url": ""}))
+        w.click_send()
+        w.now += 23 * 3600
+        w.click_send()
+        self.assertEqual(len(self.version_calls(w)), 1)
+        w.now += 2 * 3600
+        w.click_send()
+        self.assertEqual(len(self.version_calls(w)), 2)
+
+    def test_check_can_be_switched_off_in_settings(self):
+        s = dict(LC)
+        s["CHECK_UPDATES"] = False
+        w = World(s)
+        w.latest = self.NEWER
+        w.click_send().click_send()
+        self.assertEqual(self.version_calls(w), [], "išjungus serverio neklausiama visai")
+        self.assertEqual(w.asked, [])
+        self.assertEqual(len(w.posts("/job")), 2)
+
+    def test_version_comparison_is_numeric(self):
+        m = load_addin()
+        self.assertGreater(m.version_cmp("1.3.11", "1.3.9"), 0)
+        self.assertEqual(m.version_cmp("1.3.11", "1.3.11"), 0)
+        self.assertLess(m.version_cmp("1.3.11", "1.4"), 0)
+
+
+class NumberIsNeverChangedByTheAddin(unittest.TestCase):
+    """Savininkas 2026-11-23: „programa pati neturi keisti, ji turi tik pasakyti kad ne toks numeris". Iki tol,
+    pasirinkus Odoo produktą su kitu kodu, priedas tyliai perrašydavo komponento Part Number."""
+
+    PICK = {"mode": "product", "pid": 55, "tmpl": 9, "code": "LC-100-BEND"}
+
+    def test_picking_a_product_with_another_code_leaves_the_part_number_and_says_so(self):
+        comp = Comp("Bracket v3", "LC-100")
+        w = World(dict(LC, **ODOO), comp)
+        pid, tmpl, number, created, template_tmpl = w.m._resolve_product(w.settings, comp, "Bracket", "LC-100", dict(self.PICK))
+        self.assertEqual(comp.partNumber, "LC-100", "komponento Part Number nekeičiamas")
+        self.assertEqual((pid, tmpl, number, created), (55, 9, "LC-100-BEND", False), "siuntimas eina į pasirinktą produktą")
+        told = w.texts("warn") + w.texts("msg")
+        self.assertEqual(len(told), 1, "naudotojui pasakoma vieną kartą")
+        self.assertIn('"LC-100"', told[0])
+        self.assertIn('"LC-100-BEND"', told[0])
+        self.assertIn("NOT changed", told[0])
+
+    def test_the_same_code_says_nothing(self):
+        comp = Comp("Bracket v3", "LC-100")
+        w = World(dict(LC, **ODOO), comp)
+        w.m._resolve_product(w.settings, comp, "Bracket", "LC-100", dict(self.PICK, code="LC-100"))
+        self.assertEqual(comp.partNumber, "LC-100")
+        self.assertEqual(w.texts("warn") + w.texts("msg"), [])
 
 
 if __name__ == "__main__":

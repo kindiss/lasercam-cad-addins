@@ -111,6 +111,14 @@ Part custom properties used: `Number` (Odoo number), optional `LC_Material`, `LC
 With `OPEN_APP` off the add-in calls `/api/quote` silently and writes weight, DXF and the quote summary
 to Odoo itself, and copies `LC_NetKg`, `LC_UsedKg`, `LC_CutSec`, `LC_Price` into the part.
 
+## Updates
+
+From 1.4.0 the add-in tells you when a newer version is available. After a command it asks the LaserCAM server
+(`<LC_API>/addins/version`) at most once a day, on a background thread; the request carries no data about you,
+your PC or your files. If a newer version exists you are asked once whether to open the download - nothing is
+downloaded or installed without your click, and "No" is remembered for a week. Switch it off with
+`CHECK_UPDATES` in Settings. The check and your answer are kept in `%APPDATA%\LaserCAM\update-check.json`.
+
 ## Security
 
 Keys live only in `%APPDATA%\LaserCAM\solidworks-settings.json` on the user's PC. Odoo credentials travel

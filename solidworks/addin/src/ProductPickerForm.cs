@@ -51,10 +51,62 @@ namespace LaserCAM.SolidWorks
 
         static readonly Regex SheetRe = new Regex(@"(\d+(?:[.,]\d+)?)\s*[xX*]\s*(\d+(?:[.,]\d+)?)\s*[xX*]\s*(\d+(?:[.,]\d+)?)");
 
-        public ProductPickerForm(OdooClient odoo, Settings s, string number, string title, int foundProductId)
+        /// <summary>True when the dialog is shown for an assembly: the same choices as for a part, worded for an assembly.</summary>
+        readonly bool _assembly;
+
+        /// <summary>The texts that differ for an assembly (owner 2026-11-20: one path - an assembly is sent like a single
+        /// part, the Send dialog comes first, then the product setup tables).</summary>
+        internal static Dictionary<string, string> AssemblyTexts()
+        {
+            return new Dictionary<string, string>
+            {
+                { "only", "Send to LaserCAM only: nesting of its sheet metal parts, weight and time (nothing saved to Odoo)" },
+                { "laser", "Send to LaserCAM and Odoo: nesting; \"Create in Odoo\" there builds the product with its bill of materials" },
+                { "odoo", "Send files straight to the Odoo product of this assembly (no nesting)" },
+                { "pdf", "PDF drawing (<assembly>.SLDDRW)" },
+                { "cad", "CAD file (.SLDASM)" },
+                { "rowProduct", "the selected row IS this assembly (its bill of materials is updated; its reference goes into the assembly's Number)" },
+                { "rowNew", "ignore the list: a new product (\"Create in Odoo\" in LaserCAM creates it)" },
+            };
+        }
+
+        /// <summary>The texts for a single part that goes the same way as an assembly (owner 2026-11-20: a part must get
+        /// coating, bending, STEP and the data file exactly as an assembly does).</summary>
+        internal static Dictionary<string, string> PartTexts()
+        {
+            return new Dictionary<string, string>
+            {
+                { "only", "Send to LaserCAM only: nesting, weight and time (nothing saved to Odoo)" },
+                { "laser", "Send to LaserCAM and Odoo: nesting; \"Create in Odoo\" there builds the product with its bill of materials" },
+                { "odoo", "Send files straight to the Odoo product (no nesting)" },
+                { "rowProduct", "the selected row IS this part (its bill of materials is updated; its reference goes into the part's Number)" },
+                { "rowNew", "ignore the list: a new product (\"Create in Odoo\" in LaserCAM creates it)" },
+            };
+        }
+
+        /// <param name="assembly">The dialog is for an assembly.</param>
+        /// <param name="samePath">The dialog is for a single part that is sent the same way as an assembly.</param>
+        public ProductPickerForm(OdooClient odoo, Settings s, string number, string title, int foundProductId, bool assembly = false, bool samePath = false)
         {
             _odoo = odoo;
             _preselectProductId = foundProductId;
+            _assembly = assembly;
+            if (assembly || samePath)
+            {
+                var t = assembly ? AssemblyTexts() : PartTexts();
+                _actOnly.Text = t["only"]; _actLaser.Text = t["laser"]; _actOdoo.Text = t["odoo"];
+                _rowProduct.Text = t["rowProduct"]; _rowNew.Text = t["rowNew"];
+                // The product is built by "Create in Odoo" in LaserCAM, so there is no template product to choose.
+                _rowTemplate.Visible = false;
+                if (foundProductId <= 0) _rowNew.Checked = true;
+            }
+            if (assembly)
+            {
+                var t = AssemblyTexts();
+                _fPdf.Text = t["pdf"]; _fCad.Text = t["cad"];
+                // An assembly has no flat pattern of its own.
+                _fDxf.Visible = false;
+            }
             Text = "LaserCAM - " + title + " (" + number + ")";
             Width = 1000; Height = 660;
             StartPosition = FormStartPosition.CenterScreen;
@@ -78,7 +130,9 @@ namespace LaserCAM.SolidWorks
             // --- middle: product list ---
             string head = foundProductId > 0
                 ? "Odoo product \"" + number + "\" found and selected below."
-                : "No Odoo product has the Internal Reference \"" + number + "\". Pick the row that IS this part, or a template, or create a new product.";
+                : assembly
+                    ? "No Odoo product has the Internal Reference \"" + number + "\" yet. A new product will be created, or pick the row that IS this assembly."
+                    : "No Odoo product has the Internal Reference \"" + number + "\". Pick the row that IS this part, or a template, or create a new product.";
             var hint = new Label { Dock = DockStyle.Top, Height = 22, Padding = new Padding(10, 4, 10, 0), Text = head, AutoEllipsis = true };
             var searchRow = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 34, Padding = new Padding(10, 2, 10, 0), WrapContents = false };
             searchRow.Controls.AddRange(new Control[] { new Label { Text = "Odoo product (search code / name):", AutoSize = true, Margin = new Padding(3, 8, 3, 3) }, _search, _btnSearch });
@@ -95,7 +149,7 @@ namespace LaserCAM.SolidWorks
 
             // defaults from settings (remembered from the last send)
             if (s.SEND_MODE == "odoo") _actOdoo.Checked = true; else if (s.SEND_MODE == "lasercam-only") _actOnly.Checked = true; else _actLaser.Checked = true;
-            _fDxf.Checked = s.ATTACH_DXF; _fStep.Checked = s.ATTACH_STEP; _fPdf.Checked = s.ATTACH_PDF; _fCad.Checked = s.ATTACH_CAD;
+            _fDxf.Checked = s.ATTACH_DXF && !assembly; _fStep.Checked = s.ATTACH_STEP; _fPdf.Checked = s.ATTACH_PDF; _fCad.Checked = s.ATTACH_CAD;
             EventHandler sync = (o, e) =>
             {
                 bool d = _actOdoo.Checked, only = _actOnly.Checked;
@@ -131,12 +185,12 @@ namespace LaserCAM.SolidWorks
                 return;
             }
             Action = _actOdoo.Checked ? SendAction.OdooFiles : SendAction.LaserCAM;
-            SendDxf = _fDxf.Checked; SendStep = _fStep.Checked; SendPdf = _fPdf.Checked; SendCad = _fCad.Checked;
+            SendDxf = _fDxf.Checked && !_assembly; SendStep = _fStep.Checked; SendPdf = _fPdf.Checked; SendCad = _fCad.Checked;
             if (Action == SendAction.OdooFiles && !(SendDxf || SendStep || SendPdf || SendCad)) { MessageBox.Show("Tick at least one file to send.", AddIn.Title, MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
             if (_rowNew.Checked) { Mode = PickMode.NewProduct; }
             else
             {
-                if (_list.SelectedItems.Count != 1) { MessageBox.Show("Select a product row in the list, or choose \"new product without a template\".", AddIn.Title, MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+                if (_list.SelectedItems.Count != 1) { MessageBox.Show(this, _assembly ? "Select a product row in the list, or choose \"a new product\"." : "Select a product row in the list, or choose \"new product without a template\".", AddIn.Title, MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
                 var d = (Dictionary<string, object>)_list.SelectedItems[0].Tag;
                 Mode = _rowTemplate.Checked ? PickMode.Template : PickMode.Product;
                 ProductId = Convert.ToInt32(d["id"]);
@@ -175,14 +229,27 @@ namespace LaserCAM.SolidWorks
             finally { _btnSearch.Enabled = true; }
         }
 
+        /// <summary>The product name with its variant values, e.g. "Bracket (RAL 9005)": Odoo's display name without the
+        /// "[code] " in front. Without a display name - the plain name.</summary>
+        internal static string VariantName(string displayName, string code, string name)
+        {
+            string d = (displayName ?? "").Trim();
+            if (d == "") return name ?? "";
+            string prefix = "[" + (code ?? "") + "]";
+            if (!string.IsNullOrEmpty(code) && d.StartsWith(prefix, StringComparison.Ordinal)) d = d.Substring(prefix.Length).Trim();
+            return d == "" ? (name ?? "") : d;
+        }
+
         class Item { public int Id, TmplId; public string Code = "", Name = "", Sheet = "", LaserWc = ""; public bool HasBom, Dxf; public Dictionary<string, object> Row; }
 
         List<Item> Query(string q)
         {
             var domain = new List<object>();
             if (q != "") { domain.Add("|"); domain.Add(new object[] { "default_code", "ilike", q }); domain.Add(new object[] { "name", "ilike", q }); }
-            var prods = _odoo.SearchRead("product.product", domain.ToArray(), new[] { "id", "default_code", "name", "product_tmpl_id" }, 100);
-            var items = prods.Select(p => new Item { Id = Convert.ToInt32(p["id"]), TmplId = Json.M2oId(p["product_tmpl_id"]), Code = Json.Str(p, "default_code"), Name = Json.Str(p, "name"), Row = p }).OrderBy(i => i.Code).ToList();
+            // display_name carries the variant values ("... (RAL 9005)"): two colour variants of one product share the code and
+            // the name, and without it the list showed two rows that looked the same (owner 2026-11-20).
+            var prods = _odoo.SearchRead("product.product", domain.ToArray(), new[] { "id", "default_code", "name", "display_name", "product_tmpl_id" }, 100);
+            var items = prods.Select(p => new Item { Id = Convert.ToInt32(p["id"]), TmplId = Json.M2oId(p["product_tmpl_id"]), Code = Json.Str(p, "default_code"), Name = VariantName(Json.Str(p, "display_name"), Json.Str(p, "default_code"), Json.Str(p, "name")), Row = p }).OrderBy(i => i.Code).ThenBy(i => i.Name).ToList();
             if (items.Count == 0) return items;
             var tmplIds = items.Select(i => i.TmplId).Where(i => i > 0).Distinct().ToArray();
             var boms = _odoo.SearchRead("mrp.bom", new object[] { new object[] { "product_tmpl_id", "in", tmplIds } }, new[] { "id", "product_tmpl_id" }, 500);

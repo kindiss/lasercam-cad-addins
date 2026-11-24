@@ -12,7 +12,7 @@ if not exist "%CSC%" (
 if not exist bin mkdir bin
 "%CSC%" /nologo /target:winexe /platform:anycpu /optimize+ /win32icon:..\branding\ucase.ico /out:bin\LaserCAM.OdooConnector.exe ^
   /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll /r:System.Security.dll ^
-  ..\solidworks\addin\src\Http.cs ..\solidworks\addin\src\Settings.cs ..\solidworks\addin\src\SettingsForm.cs ..\solidworks\addin\src\Branding.cs ^
+  ..\solidworks\addin\src\Http.cs ..\solidworks\addin\src\Settings.cs ..\solidworks\addin\src\SettingsForm.cs ..\solidworks\addin\src\Branding.cs ..\solidworks\addin\src\UpdateCheck.cs ^
   /recurse:src\*.cs
 if errorlevel 1 (
   echo BUILD FAILED

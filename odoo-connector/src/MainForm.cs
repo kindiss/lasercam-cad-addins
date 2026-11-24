@@ -26,6 +26,7 @@ namespace LaserCAM.OdooConnector
         readonly ListView _list = new ListView { View = View.Details, CheckBoxes = true, FullRowSelect = true, Dock = DockStyle.Fill, HideSelection = false, ShowItemToolTips = true };
         readonly Label _status = new Label { Dock = DockStyle.Bottom, Height = 22, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(8, 0, 0, 0) };
         readonly Label _odooLbl = new Label { AutoSize = true, ForeColor = SystemColors.GrayText, Margin = new Padding(12, 8, 3, 3) };
+        readonly LinkLabel _updateLink = new LinkLabel { AutoSize = true, Visible = false, Margin = new Padding(16, 8, 3, 3) };
         List<BomInfo> _boms = new List<BomInfo>();
         const int PdfCol = 6;
         bool _pdfBusy;
@@ -39,7 +40,7 @@ namespace LaserCAM.OdooConnector
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
             var top = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 44, Padding = new Padding(8, 6, 8, 0), FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
-            top.Controls.AddRange(new Control[] { new Label { Text = "Bill of materials:", AutoSize = true, Margin = new Padding(3, 8, 3, 3) }, _search, _btnSearch, _btnSettings, _odooLbl });
+            top.Controls.AddRange(new Control[] { new Label { Text = "Bill of materials:", AutoSize = true, Margin = new Padding(3, 8, 3, 3) }, _search, _btnSearch, _btnSettings, _odooLbl, _updateLink });
             var bottom = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 46, Padding = new Padding(8, 6, 8, 0), FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
             bottom.Controls.AddRange(new Control[] { _btnNest, new Label { Width = 20 }, _template });
             _template.Margin = new Padding(3, 9, 3, 3);
@@ -52,6 +53,7 @@ namespace LaserCAM.OdooConnector
             _search.KeyDown += (o, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; var _ = LoadBoms(); } };
             _btnSettings.Click += (o, e) => { if (EditSettings()) { var _ = LoadBoms(); } };
             _btnNest.Click += (o, e) => { var _ = Nest(); };
+            _updateLink.LinkClicked += (o, e) => { try { System.Diagnostics.Process.Start((string)_updateLink.Tag); } catch { } };
             // "Drawing" column: click PDF -> download the product's (else the BOM's) drawing and open it with the default PDF app.
             _list.MouseClick += (o, e) =>
             {
@@ -69,6 +71,12 @@ namespace LaserCAM.OdooConnector
                     if (!EditSettings()) { Close(); return; }
                 }
                 Apply();
+                // Newer version: show what the last check found, then refresh in the background (once a day).
+                if (_s.CHECK_UPDATES)
+                {
+                    ShowUpdate();
+                    UpdateCheck.RefreshInBackground(_s.LC_API, () => { try { BeginInvoke((Action)ShowUpdate); } catch { } });
+                }
                 await LoadBoms();
             };
         }
@@ -89,6 +97,16 @@ namespace LaserCAM.OdooConnector
             _odooLbl.Text = "Odoo: " + _s.ODOO_URL;
         }
         void Status(string s) { _status.Text = s; }
+
+        /// A link next to the Odoo address when a newer version of the add-ins is known; click opens the download.
+        void ShowUpdate()
+        {
+            var info = UpdateCheck.Known();
+            _updateLink.Visible = info != null;
+            if (info == null) return;
+            _updateLink.Text = "New version " + info.Version + " - download";
+            _updateLink.Tag = info.Url;
+        }
 
         async Task LoadBoms()
         {

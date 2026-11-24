@@ -13,7 +13,7 @@ using SolidWorks.Interop.swconst;
 
 namespace LaserCAM.SolidWorks
 {
-    public class Exporter
+    public partial class Exporter
     {
         readonly ISldWorks _sw;
         readonly Settings _s;
@@ -35,8 +35,32 @@ namespace LaserCAM.SolidWorks
             _lc = new LaserCamClient(s.LC_API, s.LC_PID, s.LC_KEY);
         }
 
-        ProgressForm _prog;   // current progress window: message boxes are owned by it so they show on top of it
-        IWin32Window Owner { get { return _prog != null ? _prog.OwnerOrNull : null; } }
+        ProgressForm _prog;   // current progress window
+        /// <summary>Owner of our message boxes: the SolidWorks main window, so a message is in front as soon as SolidWorks
+        /// is (also from its taskbar button); without it - the progress window. When another program is in front (the
+        /// browser with LaserCAM), the SolidWorks taskbar button flashes so the waiting message is noticed.</summary>
+        IWin32Window Owner
+        {
+            get
+            {
+                IntPtr main = MainWindow();
+                if (main == IntPtr.Zero) return _prog != null ? _prog.OwnerOrNull : null;
+                if (Attention.OtherProgramInFront()) Attention.Flash(main);
+                return new HwndOwner(main);
+            }
+        }
+        /// <summary>The SolidWorks main window.</summary>
+        IntPtr MainWindow()
+        {
+            try { var f = _sw.Frame() as IFrame; if (f != null) return new IntPtr(f.GetHWndx64()); } catch { /* next way */ }
+            try { return System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle; } catch { return IntPtr.Zero; }
+        }
+        /// <summary>Keeps the progress window above the SolidWorks window while part and drawing windows open for the export.</summary>
+        void KeepAbove(ProgressForm prog)
+        {
+            IntPtr main = MainWindow();
+            if (main != IntPtr.Zero) prog.StayAbove = new HwndOwner(main);
+        }
         DialogResult Ask(string text, MessageBoxButtons b = MessageBoxButtons.YesNo, MessageBoxIcon i = MessageBoxIcon.Question)
         {
             return MessageBox.Show(Owner, text, AddIn.Title, b, i);
@@ -44,10 +68,51 @@ namespace LaserCAM.SolidWorks
         void Info(string text, string title = null) { MessageBox.Show(Owner, text, title ?? AddIn.Title, MessageBoxButtons.OK, MessageBoxIcon.Information); }
         void Err(string text) { MessageBox.Show(Owner, text, AddIn.Title, MessageBoxButtons.OK, MessageBoxIcon.Error); }
 
+        /// <summary>
+        /// Owner 2026-11-23: "the program must not change it by itself, it must only say that the number is not the
+        /// right one". Until then picking an Odoo product with another reference silently overwrote the file's Number
+        /// property. Now the property is left alone: the user is told both values and decides in SolidWorks.
+        /// <paramref name="used"/> is the number the sending started with (the property, or the file name when it is empty).
+        /// </summary>
+        void TellNumberDiffers(IModelDoc2 model, string used, string picked)
+        {
+            if (_s.NumberFrom != Settings.FromProperty)
+            {
+                // The Odoo number is the file name (or the title): a product code that is that name plus a stage ending
+                // (17511-...-P-BEND for 17511-...-P) is the same product - nothing to tell.
+                if (picked.StartsWith(used, StringComparison.OrdinalIgnoreCase)) return;
+                Log.Write("number differs: " + NameNumberWord + " = " + used + ", chosen Odoo product = " + picked + " - nothing is changed");
+                Info("The SolidWorks " + NameNumberWord + " is \"" + used + "\", but the chosen Odoo product has the reference \"" + picked + "\".\n\n"
+                    + "Nothing was changed. This sending goes to the chosen product.");
+                return;
+            }
+            string prop = CustomProp(model, _s.NUMBER_PROPERTY);
+            if (prop == "False" || prop == "false") prop = "";
+            string inFile = prop != "" ? "is \"" + prop + "\"" : "is empty (\"" + used + "\" was taken from the file name)";
+            Log.Write("number differs: property " + _s.NUMBER_PROPERTY + " " + (prop != "" ? "= " + prop : "is empty") + ", chosen Odoo product = " + picked + " - the property is not changed");
+            Info("The custom property \"" + _s.NUMBER_PROPERTY + "\" of this file " + inFile + ", but the chosen Odoo product has the reference \"" + picked + "\".\n\n"
+                + "The property was NOT changed. This sending goes to the chosen product.\n"
+                + "If the number in the file is wrong, correct it in SolidWorks yourself.");
+        }
+
         public void Run(IModelDoc2 model)
         {
-            if (model == null) { Ask("Open a sheet metal part first.", MessageBoxButtons.OK, MessageBoxIcon.Exclamation); return; }
-            if (model.GetType() != (int)swDocumentTypes_e.swDocPART) { Ask("The active document is not a part.", MessageBoxButtons.OK, MessageBoxIcon.Exclamation); return; }
+            if (model == null) { Ask("Open a sheet metal part or an assembly first.", MessageBoxButtons.OK, MessageBoxIcon.Exclamation); return; }
+            // A drawing: send the part or the assembly it shows (its window becomes the active one).
+            if (model.GetType() == (int)swDocumentTypes_e.swDocDRAWING)
+            {
+                var shown = ModelOfDrawing(model);
+                if (shown == null) { Ask("This drawing shows no part or assembly.", MessageBoxButtons.OK, MessageBoxIcon.Exclamation); return; }
+                try { int err = 0; _sw.ActivateDoc2(shown.GetTitle(), true, ref err); } catch { /* send it without its own window */ }
+                model = shown;
+            }
+            // An assembly: everything goes in one step (data + a flat pattern of every sheet metal part) - see AssemblySend.cs.
+            if (model.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY) { RunAssembly(model); return; }
+            if (model.GetType() != (int)swDocumentTypes_e.swDocPART) { Ask("The active document is not a part or an assembly.", MessageBoxButtons.OK, MessageBoxIcon.Exclamation); return; }
+            // A single part goes the same way as an assembly (owner 2026-11-20: "one path" - the part must get its coating,
+            // bending, STEP and data file like an assembly does). Only the silent quote without the browser (OPEN_APP off)
+            // still uses the older single-part steps below.
+            if (_s.OPEN_APP) { RunAssembly(model); return; }
             // No Odoo address and no Odoo key = LaserCAM only: no product list, nothing read from or written to Odoo.
             _useOdoo = !(string.IsNullOrEmpty((_s.ODOO_URL ?? "").Trim()) && string.IsNullOrEmpty((_s.ODOO_API_KEY ?? "").Trim()));
             if (!_useOdoo && !LcKeySet)
@@ -56,7 +121,7 @@ namespace LaserCAM.SolidWorks
                     + "1. LaserCAM only (no Odoo): LC_PID and LC_KEY - your LaserCAM key from laser.ucase.eu (Basic plan). The flat pattern opens in LaserCAM for nesting.\n\n"
                     + "2. With Odoo: ODOO_URL and ODOO_API_KEY (in Odoo: My profile > Account security > New API key). Add LC_PID and LC_KEY too if you want nesting, weight and time in LaserCAM.\n\n"
                     + "The settings window opens now; after saving, click Send to LaserCAM again.", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                using (var f = new SettingsForm(_s)) { if (f.ShowDialog() == DialogResult.OK) f.Result.Save(); }
+                using (var f = new SettingsForm(_s)) { if (Attention.ShowDialogInFront(f, MainWindow()) == DialogResult.OK) f.Result.Save(); }
                 return;
             }
             if (_useOdoo &&(string.IsNullOrEmpty((_s.ODOO_URL ?? "").Trim()) || string.IsNullOrEmpty((_s.ODOO_API_KEY ?? "").Trim())))
@@ -69,12 +134,13 @@ namespace LaserCAM.SolidWorks
                     + "- ODOO_DB: only for on-premise Odoo with several databases\n\n"
                     + "With both filled in you can still send to LaserCAM only - it is a choice in the Send dialog.\n\n"
                     + "The settings window opens now; after saving, click Send to LaserCAM again.", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                using (var f = new SettingsForm(_s)) { if (f.ShowDialog() == DialogResult.OK) f.Result.Save(); }
+                using (var f = new SettingsForm(_s)) { if (Attention.ShowDialogInFront(f, MainWindow()) == DialogResult.OK) f.Result.Save(); }
                 return;
             }
             using (var prog = new ProgressForm("LaserCAM - sending " + CleanTitle(model.GetTitle())))
             {
                 _prog = prog;
+                KeepAbove(prog);
                 try { RunSteps(model, prog); }
                 finally { prog.Hide(); _prog = null; }
             }
@@ -83,9 +149,12 @@ namespace LaserCAM.SolidWorks
         void RunSteps(IModelDoc2 model, ProgressForm prog)
         {
             prog.Step(3, "Reading the part...");
+            ShapeReader.Reset();   // the part may have been edited since the last command
 
             string title = CleanTitle(model.GetTitle());
-            string number = CustomProp(model, _s.NUMBER_PROPERTY);
+            // The Odoo number: the file name, the title or the custom property (setting ODOO_NUMBER_FROM, owner 2026-11-23).
+            // With the file name or the title there is nothing to ask for and nothing is written into the part.
+            string number = _s.NumberFrom != Settings.FromProperty ? NameNumber(model) : CustomProp(model, _s.NUMBER_PROPERTY);
             if (number == "False" || number == "false") number = "";   // 1.0.6 wrote Odoo's empty code as "False"
             if (number == "" && !_useOdoo) number = title != "" ? title : "part";   // without Odoo the number is not needed: the file name will do
             if (number == "")
@@ -110,7 +179,7 @@ namespace LaserCAM.SolidWorks
             using (var pick = new ProductPickerForm(_odoo, _s, number, title, pid))
             {
                 prog.Hide();
-                var dr = pick.ShowDialog();
+                var dr = Attention.ShowDialogInFront(pick, MainWindow());
                 if (dr != DialogResult.OK || pick.Mode == PickMode.Cancel) return;
                 prog.Step(20, "Odoo product chosen...");
                 action = pick.Action; fDxf = pick.SendDxf; fStep = pick.SendStep; fPdf = pick.SendPdf; fCad = pick.SendCad;
@@ -129,8 +198,10 @@ namespace LaserCAM.SolidWorks
                     _tmpl = pick.TemplateId;
                     if (!string.IsNullOrEmpty(pick.Code) && pick.Code != number)
                     {
-                        number = pick.Code;   // the picked reference becomes the part's number
-                        SetCustomProp(model, _s.NUMBER_PROPERTY, number);
+                        // Owner 2026-11-23: the add-in never changes the Number property by itself - it only says that
+                        // the number differs. This sending goes to the picked product; the file stays as it is.
+                        TellNumberDiffers(model, number, pick.Code);
+                        number = pick.Code;
                     }
                 }
                 else
@@ -238,12 +309,27 @@ namespace LaserCAM.SolidWorks
                 }
                 if (_sheetProductId > 0) body["sheetProductId"] = _sheetProductId;
                 if (_s.WAIT_FOR_RESULT) body["wait"] = true;   // LaserCAM shows "Send result to SolidWorks" only then
+                // The part's drawing (<part>.SLDDRW next to it) travels as PDF: LaserCAM checks the holes and threads against it.
+                try
+                {
+                    prog.Step(50, "Exporting the drawing to PDF (when the part has one)...");
+                    string drwDir = Path.Combine(Path.GetTempPath(), "lasercam_assembly");
+                    Directory.CreateDirectory(drwDir);
+                    string drwPdf = DrawingPdfOf(model.GetPathName() ?? "", drwDir);
+                    if (drwPdf != "")
+                    {
+                        byte[] pdfBytes = File.ReadAllBytes(drwPdf);
+                        if (pdfBytes.Length <= MaxDrawingBytes)
+                            body["drawings"] = new object[] { new Dictionary<string, object> { { "name", SafeName(number) + ".pdf" }, { "b64", Convert.ToBase64String(pdfBytes) } } };
+                    }
+                }
+                catch { /* the job goes without the drawing */ }
                 prog.Step(55, "Creating the LaserCAM job (uploading the DXF)...");
                 resp = _lc.Post("/job", body);
                 string jobId = Json.Str(resp, "id"), jobUrl = Json.Str(resp, "url");
                 if (jobId == "" || jobUrl == "") { Err("LaserCAM did not return a job id."); return; }
                 prog.Step(65, "Opening LaserCAM in the browser...");
-                Process.Start(jobUrl);
+                Process.Start(AppUrlOf(jobUrl, jobId));
                 prog.Step(100, "Done.");
                 if (!_s.WAIT_FOR_RESULT)
                 {
@@ -400,6 +486,11 @@ namespace LaserCAM.SolidWorks
         {
             // ExportToDWG2: Action 1 = sheet metal flat pattern; SheetMetalOptions bit 1 = geometry (4 = bend lines).
             // Alignment: 12 doubles (origin + X/Y/Z axes); Views: empty.
+            // A plain plate (no sheet metal feature, thickness from the custom property): there is no flat pattern, its
+            // outline is the largest flat face (owner 2026-11-23: such parts went to Odoo without DXF and STEP).
+            // A body that is seen not to be flat (the person chose "sheet part" for a part bent without the sheet metal
+            // feature): its largest face is one flange, not its outline - no DXF is made; its STEP still goes.
+            if (SheetMetalThickness(model) <= 0) return !ShapeReader.Of(model).NotFlat && ExportPlateDxf(model, path);
             var align = new double[12];
             align[3] = 1; align[7] = 1; align[11] = 1;
             try
@@ -413,7 +504,139 @@ namespace LaserCAM.SolidWorks
             catch { return false; }
         }
 
+        /// <summary>
+        /// The outline of a plain plate: its largest flat face with every hole in it, exported as seen along the face normal
+        /// (ExportToDWG2, Action 2 = the selected faces). The alignment is the face's own plane, so the drawing lies flat.
+        /// </summary>
+        static bool ExportPlateDxf(IModelDoc2 model, string path)
+        {
+            try
+            {
+                if (File.Exists(path)) File.Delete(path);
+                var partDoc = model as IPartDoc;
+                if (partDoc == null) return false;
+                IFace2 best = null;
+                double bestArea = 0;
+                var bodies = partDoc.GetBodies2(0, true) as object[];   // 0 = solid bodies, visible only
+                if (bodies == null) return false;
+                foreach (object bo in bodies)
+                {
+                    var body = bo as IBody2;
+                    var faces = body != null ? body.GetFaces() as object[] : null;
+                    if (faces == null) continue;
+                    foreach (object fo in faces)
+                    {
+                        var face = fo as IFace2;
+                        var surf = face != null ? face.GetSurface() as ISurface : null;
+                        if (surf == null || !surf.IsPlane()) continue;
+                        double area = face.GetArea();
+                        if (area > bestArea) { bestArea = area; best = face; }
+                    }
+                }
+                if (best == null) return false;
+                var plane = ((ISurface)best.GetSurface()).PlaneParams as double[];   // normal x y z, a point x y z
+                if (plane == null || plane.Length < 6) return false;
+                double[] n = UnitVec(new[] { plane[0], plane[1], plane[2] });
+                if (n == null) return false;
+                // Any direction in the plane serves as X: LaserCAM lays the part out itself.
+                double[] x = UnitVec(CrossVec(Math.Abs(n[2]) < 0.9 ? new double[] { 0, 0, 1 } : new double[] { 1, 0, 0 }, n));
+                if (x == null) return false;
+                double[] y = CrossVec(n, x);
+                var align = new double[] { plane[3], plane[4], plane[5], x[0], x[1], x[2], y[0], y[1], y[2], n[0], n[1], n[2] };
+                model.ClearSelection2(true);
+                if (!((IEntity)best).Select4(false, null)) return false;
+                bool ok = partDoc.ExportToDWG2(path, model.GetPathName(), 2, true, align, false, false, 0, null);
+                model.ClearSelection2(true);
+                return ok && File.Exists(path);
+            }
+            catch { return false; }
+        }
+
+        static double[] CrossVec(double[] a, double[] b)
+        {
+            return new[] { a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0] };
+        }
+
+        static double[] UnitVec(double[] v)
+        {
+            double len = Math.Sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            return len < 1e-12 ? null : new[] { v[0] / len, v[1] / len, v[2] / len };
+        }
+
+        /// <summary>
+        /// Thickness of a sheet part in mm; 0 = not a sheet part. From the sheet metal feature when there is one. A part
+        /// without it is measured (ShapeClassifier.cs, owner 2026-11-23): only a flat plate of one thickness is cut from
+        /// sheet - a milled or turned part or a tube is not, whatever its "Thickness" property says. A standard
+        /// (Toolbox) part is never one, and neither is a plate with no material and no "Thickness" property (a bought
+        /// pad or shim). When the shape cannot be told (several bodies, free-form, a block of one thickness), the person
+        /// chooses the type at the start of a send (owner 2026-11-24, AskPartTypes); "sheet part" chosen: the thickness
+        /// is the measured one when the body allowed it, else the "Thickness" property. Only where nobody was asked
+        /// (the silent quote) the property decides as before.
+        /// LaserCAM applies the same rules to the data file (assembly/fromSolidworks.ts).
+        /// </summary>
         static double SheetThickness(IModelDoc2 model)
+        {
+            double t = SheetMetalThickness(model);
+            if (t > 0) return t;
+            if (IsToolbox(model)) return 0;
+            PartShape shape = ShapeReader.Of(model);
+            double prop = PlateThickness(model);
+            if (shape.Kind == PartShape.Plate) return prop > 0 || HasMaterial(model) ? shape.ThicknessMm : 0;
+            if (shape.Kind != PartShape.Unknown) return 0;
+            if (shape.Chosen == "") return prop;
+            return shape.Chosen == PartShape.Plate ? (shape.ThicknessMm > 0 ? shape.ThicknessMm : prop) : 0;
+        }
+
+        /// <summary>Why a part without a flat pattern is not sent as a sheet part, for the message to the user.</summary>
+        static string NotSheetText(IModelDoc2 model)
+        {
+            if (IsToolbox(model)) return "This is a standard (Toolbox) part: there is no flat pattern to send.";
+            PartShape shape = ShapeReader.Of(model);
+            if (shape.Kind == PartShape.Plate) return "This part is a " + shape.Text() + ", but it has no material and no \"Thickness\" property, so it is taken as a bought part. Set its material and send again.";
+            if (shape.Kind == PartShape.Unknown)
+            {
+                if (shape.Chosen == PartShape.Plate) return "This part was chosen as a sheet part, but its thickness could not be measured. Add the custom property \"Thickness\" (mm) and send again.";
+                int at = PartTypes.IndexOf(shape.Chosen);
+                if (at >= 0) return "This part was chosen as: " + PartTypes.Kinds[at][1] + ". There is no flat pattern to send.\n\nTo choose its type again, hold Shift when clicking Send.";
+                return "This part is not a sheet metal part: there is no flat pattern to send.";
+            }
+            return "This part is not cut from sheet: it was recognised as a " + shape.Text() + ". There is no flat pattern to send.";
+        }
+
+        /// <summary>A standard part of the SolidWorks Toolbox (also a copied one, also by its folder).</summary>
+        static bool IsToolbox(IModelDoc2 model)
+        {
+            try { if (model.Extension.ToolboxPartType != 0) return true; } catch { /* decided by the folder */ }
+            try { return System.Text.RegularExpressions.Regex.IsMatch(model.GetPathName() ?? "", @"[\\/]solidworks data[^\\/]*[\\/]browser[\\/]", System.Text.RegularExpressions.RegexOptions.IgnoreCase); }
+            catch { return false; }
+        }
+
+        /// <summary>The part has a material in any of its configurations.</summary>
+        static bool HasMaterial(IModelDoc2 model)
+        {
+            var part = model as IPartDoc;
+            if (part == null) return false;
+            try
+            {
+                string db;
+                if ((part.GetMaterialPropertyName2("", out db) ?? "").Trim() != "") return true;
+                var names = model.GetConfigurationNames() as string[];
+                if (names != null)
+                    foreach (string cfg in names)
+                        if ((part.GetMaterialPropertyName2(cfg, out db) ?? "").Trim() != "") return true;
+            }
+            catch { /* no material */ }
+            return false;
+        }
+
+        static double PlateThickness(IModelDoc2 model)
+        {
+            double t;
+            string raw = CustomProp(model, "Thickness").Replace(',', '.');
+            return double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out t) && t > 0 && t < 200 ? Math.Round(t, 3) : 0;
+        }
+
+        static double SheetMetalThickness(IModelDoc2 model)
         {
             // First "SheetMetal" feature -> SheetMetalFeatureData.Thickness (meters -> mm).
             var f = model.FirstFeature() as IFeature;
@@ -524,7 +747,7 @@ namespace LaserCAM.SolidWorks
                 var cancel = new Button { Text = "Cancel", Left = 347, Top = 92, Width = 85, DialogResult = DialogResult.Cancel };
                 f.Controls.AddRange(new Control[] { lbl, tb, ok, cancel });
                 f.AcceptButton = ok; f.CancelButton = cancel;
-                return f.ShowDialog() == DialogResult.OK ? tb.Text.Trim() : "";
+                return Attention.ShowDialogInFront(f, IntPtr.Zero) == DialogResult.OK ? tb.Text.Trim() : "";
             }
         }
     }

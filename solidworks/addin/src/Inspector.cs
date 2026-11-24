@@ -2,7 +2,8 @@
 // Hole Wizard holes (thread or plain hole, size, tap drill, countersink / counterbore, hole count), cosmetic threads,
 // sheet metal (thickness, K-factor) and every bend (edge flange, sketched bend, jog = double bend, flat-pattern bends),
 // weld beads, cut-list properties, custom properties (Number), configurations, material, mass, and for an assembly the
-// component tree. Nothing is guessed from geometry. The file is the ground truth for building the assembly export:
+// component tree. Nothing is guessed from geometry - with one labelled exception: "shape" says what a part without a
+// sheet metal feature looks like (plate, tube, turned, milled). The file is the ground truth for building the assembly export:
 // the feature data interfaces are dumped by reflection, so we see what a real part contains before deciding the format.
 // Raw API units: metres and radians.
 using System;
@@ -24,16 +25,25 @@ namespace LaserCAM.SolidWorks
 
         public Inspector(ISldWorks sw) { _sw = sw; }
 
+        /// "filename" or "property": where the Odoo number comes from (from the settings); written into the data file.
+        public string OdooCodeFrom { get; set; }
+
+        /// The value for <see cref="OdooCodeFrom"/> from the settings.
+        public static string CodeFromOf(Settings s) { return s != null ? s.NumberFrom : Settings.FromProperty; }
+
         /// Number of features read by the last Run (for the confirmation message).
         public int FeatureCount { get { return _features; } }
 
         public string Run(IModelDoc2 model)
         {
+            // The shapes are measured once per command: the command that calls this clears them first (ShapeReader.Reset).
             var root = new Dictionary<string, object>();
             root["format"] = "lasercam-solidworks-dump";
             root["version"] = 1;
             root["units"] = "raw SolidWorks API values: lengths in metres, angles in radians";
             root["addin"] = typeof(Inspector).Assembly.GetName().Version.ToString();
+            // What the Odoo number is (setting ODOO_NUMBER_FROM): LaserCAM then reads the numbers the same way.
+            if (!string.IsNullOrEmpty(OdooCodeFrom)) root["odooCodeFrom"] = OdooCodeFrom;
             Put(root, "solidworks", () => _sw.RevisionNumber());
             root["exportedAt"] = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss");
             root["document"] = Document(model);
@@ -78,7 +88,8 @@ namespace LaserCAM.SolidWorks
             if (part != null)
             {
                 Put(d, "material", () => { string db; string name = part.GetMaterialPropertyName2("", out db); return new Dictionary<string, object> { { "name", name }, { "database", db } }; });
-                // The material can differ per configuration (the owner keeps the real one in the flat-pattern configuration).
+                // The material can differ per configuration (the real one is in the bent configuration the assembly uses;
+                // the flat-pattern configuration often keeps an old one - owner 2026-11-17). LaserCAM decides which to take.
                 Put(d, "materialByConfiguration", () =>
                 {
                     var all = new Dictionary<string, object>();
@@ -103,6 +114,10 @@ namespace LaserCAM.SolidWorks
                         }
                     return list;
                 });
+                // What the part is by its geometry: plate, tube, turned, milled (ShapeClassifier.cs; sizes in mm). The one
+                // judgement in this file - LaserCAM uses it only for a part without a sheet metal feature and shows it as a note.
+                Put(d, "shape", () => ShapeReader.Of(model).ToJson());
+                Put(d, "toolboxPartType", () => model.Extension.ToolboxPartType);   // 0 = not a Toolbox part
             }
             _features = 0;
             Put(d, "features", () =>
@@ -194,6 +209,17 @@ namespace LaserCAM.SolidWorks
                 if (!(m.Name.StartsWith("Get", StringComparison.Ordinal) || m.Name.StartsWith("Is", StringComparison.Ordinal))) continue;
                 try { d[m.Name + "()"] = Plain(m.Invoke(typed, null)); }
                 catch (Exception ex) { d[m.Name + "()"] = "error: " + Inner(ex); }
+            }
+            // A bend with its own allowance (K-factor, deduction, table) changes the flat pattern without changing the
+            // folded shape, so it must be part of what is read (the reuse of unchanged exports relies on it).
+            if (typeof(T) != typeof(ICustomBendAllowance))
+            {
+                MethodInfo own = typeof(T).GetMethod("GetCustomBendAllowance", Type.EmptyTypes);
+                if (own != null)
+                {
+                    try { Data<ICustomBendAllowance>(d, "customBendAllowance", own.Invoke(typed, null)); }
+                    catch { /* this feature has none */ }
+                }
             }
             target[key] = d;
         }

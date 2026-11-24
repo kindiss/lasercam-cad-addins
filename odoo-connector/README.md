@@ -40,6 +40,14 @@ The key inherits the rights of the Odoo user who created it. Needed: **Manufactu
 centers, operations, BOMs) and **Inventory: User** (products, attachments, reordering rules). No system
 administrator rights are required.
 
+## Updates
+
+From 1.4.0 the Connector tells you when a newer version is available. At start it asks the LaserCAM server
+(`<LC_API>/addins/version`) at most once a day, on a background thread; the request carries no data about you,
+your PC or your files. If a newer version exists you are asked once whether to open the download - nothing is
+downloaded or installed without your click, and "No" is remembered for a week. Switch it off with
+`CHECK_UPDATES` in Settings. The check and your answer are kept in `%APPDATA%\LaserCAM\update-check.json`.
+
 ## Odoo versions
 
 Odoo 14 and newer (operations on the BOM; Odoo 18+ Product Capacities). Odoo Online is always the latest.

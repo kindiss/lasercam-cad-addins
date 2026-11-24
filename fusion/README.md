@@ -146,6 +146,14 @@ All Odoo calls use the JSON-2 API (`POST {ODOO_URL}/json/2/<model>/<method>`, be
 Odoo Online). Numeric ids are sent unquoted in domains (a quoted id on a many2one field makes Odoo
 search by name).
 
+## Updates
+
+From 1.4.0 the add-in tells you when a newer version is available. After a command it asks the LaserCAM server
+(`<LC_API>/addins/version`) at most once a day, on a background thread; the request carries no data about you,
+your PC or your files. If a newer version exists you are asked once whether to open the download - nothing is
+downloaded or installed without your click, and "No" is remembered for a week. Switch it off with
+`CHECK_UPDATES` in Settings. The check and your answer are kept in `%APPDATA%\LaserCAM\update-check.json`.
+
 ## Troubleshooting
 
 - "No sheet metal body in component" - the body is not sheet metal. Sheet Metal tab -> Convert to Sheet

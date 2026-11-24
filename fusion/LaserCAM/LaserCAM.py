@@ -26,6 +26,8 @@ import json
 import os
 import re
 import tempfile
+import threading
+import time
 import traceback
 import urllib.error
 import urllib.request
@@ -47,8 +49,16 @@ RESOURCES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources"
 
 # ---------------- SETTINGS ----------------
 SETTINGS_PATH = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LaserCAM", "fusion-settings.json")
+# ---- "a newer version is available" check (same rules as the SolidWorks add-in, UpdateCheck.cs) ----
+# Version of the installer this file ships in. MUST match AppVersion in installer/LaserCAM-Setup.iss
+# (checked by scripts/addins-version-check.mjs).
+SUITE_VERSION = "1.4.0"
+UPDATE_STATE_PATH = os.path.join(os.path.dirname(SETTINGS_PATH), "update-check.json")
+RELEASES_PAGE = "https://github.com/kindiss/lasercam-cad-addins/releases/latest"
+OWN_URL_PREFIX = "https://github.com/kindiss/lasercam-cad-addins/releases/"
 DEFAULTS = {
     "LC_API": "https://laser.ucase.eu/api",
+    "CHECK_UPDATES": True,        # ask the LaserCAM server once a day whether a newer add-in version exists
     "LC_PID": 0,                  # Odoo contact id (res.partner) that holds the LaserCAM plan
     "LC_KEY": "",                 # LaserCAM key from that contact (x_studio_lasercam_key)
     "ODOO_URL": "",               # your Odoo address, e.g. https://mycompany.odoo.com
@@ -251,6 +261,122 @@ def http(method, url, body=None, headers=None, timeout=600):
     except (urllib.error.URLError, OSError) as e:
         # no connection / wrong host / timeout -> status 0, the callers turn it into a plain-language message
         return 0, str(getattr(e, "reason", e))
+
+
+# ---------------- newer version check ----------------
+# The add-in asks only the LaserCAM server (GET <LC_API>/addins/version), at most once a day and on a background
+# thread. The request carries no data about the user, the PC or the files. The answer is kept in
+# update-check.json next to the settings; the offer is shown from that file at the end of a command.
+_VERSION_RE = re.compile(r"^\d+(\.\d+){1,3}$")
+
+
+def _now():
+    return time.time()
+
+
+def _run_in_background(fn):
+    threading.Thread(target=fn, daemon=True).start()
+
+
+def version_cmp(a, b):
+    """> 0 when a is newer than b. Compared number by number ("1.3.11" is newer than "1.3.9")."""
+    pa = [int(x) if x.isdigit() else 0 for x in str(a).split(".")]
+    pb = [int(x) if x.isdigit() else 0 for x in str(b).split(".")]
+    for i in range(max(len(pa), len(pb))):
+        d = (pa[i] if i < len(pa) else 0) - (pb[i] if i < len(pb) else 0)
+        if d:
+            return d
+    return 0
+
+
+def _update_state():
+    try:
+        with open(UPDATE_STATE_PATH, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_update_state(st):
+    try:
+        os.makedirs(os.path.dirname(UPDATE_STATE_PATH), exist_ok=True)
+        with open(UPDATE_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+    except Exception:
+        pass
+
+
+def known_update():
+    """(version, url) of a newer version known from the last check, or None. Reads the state file only."""
+    st = _update_state()
+    latest = str(st.get("latest") or "")
+    if not _VERSION_RE.match(latest) or version_cmp(latest, SUITE_VERSION) <= 0:
+        return None
+    url = str(st.get("url") or "")
+    return latest, (url if url.startswith(OWN_URL_PREFIX) else RELEASES_PAGE)
+
+
+def refresh_update(s):
+    """Asks the server in the background when the last check is older than a day. Never raises."""
+    st = _update_state()
+    try:
+        if _now() - float(st.get("checkedAt") or 0) < 24 * 3600:
+            return
+    except Exception:
+        pass
+    api = str((s or {}).get("LC_API") or DEFAULTS["LC_API"]).rstrip("/")
+
+    def work():
+        try:
+            status, text = http("GET", api + "/addins/version", timeout=5)
+            if not status:
+                return                      # offline: try again at the next command
+            st2 = _update_state()
+            st2["checkedAt"] = _now()       # the server answered (even an old one without this address): ask again tomorrow
+            if status == 200:
+                d = json.loads(text)
+                v = d.get("version") if isinstance(d, dict) else None
+                if isinstance(v, str) and _VERSION_RE.match(v):
+                    st2["latest"] = v
+                    st2["url"] = str(d.get("url") or "")
+            _save_update_state(st2)
+        except Exception:
+            pass
+    _run_in_background(work)
+
+
+def offer_update():
+    """Asks once per version per week whether to download the newer installer. True when the question was shown."""
+    k = known_update()
+    if not k:
+        return False
+    st = _update_state()
+    try:
+        if st.get("declined") == k[0] and _now() - float(st.get("declinedAt") or 0) < 7 * 86400:
+            return False
+    except Exception:
+        pass
+    if ask_yes_no("A newer version of the LaserCAM add-ins is available: %s (you have %s).\n\n"
+                  "Download the installer now? Close Fusion and SolidWorks before you run it; your settings are kept."
+                  % (k[0], SUITE_VERSION)):
+        webbrowser.open(k[1])
+    else:
+        st["declined"] = k[0]
+        st["declinedAt"] = _now()
+        _save_update_state(st)
+    return True
+
+
+def after_command(s):
+    """End of a command: offer a known newer version, then let the daily check run in the background."""
+    try:
+        if not (s or {}).get("CHECK_UPDATES", True):
+            return                          # switched off in Settings
+        offer_update()
+        refresh_update(s)
+    except Exception:
+        pass
 
 
 # ---------------- LaserCAM ----------------
@@ -772,6 +898,7 @@ def send_to_odoo(pick=None, pending=None):
             _send_steps(s, design, comp, body, title, number, progress, pick, use_odoo)
     finally:
         progress.hide()
+    after_command(s)
 
 
 def _resolve_product(s, comp, title, number, pick):
@@ -785,8 +912,12 @@ def _resolve_product(s, comp, title, number, pick):
             tmpl = int(pick.get("tmpl") or 0)
             code = (pick.get("code") or "").strip()
             if code and code != number:
+                # Owner 2026-11-23: the add-in never changes the Part Number by itself - it only says that the number
+                # differs. This sending goes to the picked product; the component stays as it is.
+                warn('The Part Number of this component is "%s", but the chosen Odoo product has the reference "%s".\n\n'
+                     'The Part Number was NOT changed. This sending goes to the chosen product.\n'
+                     'If the number in the component is wrong, correct it in Fusion yourself.' % (number, code))
                 number = code
-                comp.partNumber = number
         elif pick.get("mode") == "template":
             template_tmpl = int(pick.get("tmpl") or 0)
         if pid == 0:
@@ -1251,6 +1382,7 @@ SETTINGS_FIELDS = [
     ("QUANTITY", "Quantity", "int"),
     ("OPEN_APP", "Open LaserCAM in the browser", "bool"),
     ("SEND_ODOO_FROM_APP", "Save to Odoo from LaserCAM app", "bool"),
+    ("CHECK_UPDATES", "Tell me when a newer version is available (asks once a day)", "bool"),
 ]
 
 
@@ -1277,6 +1409,7 @@ class SettingsExecuteHandler(adsk.core.CommandEventHandler):
                     s[key] = (inp.value or "").strip()
             save_settings(s)
             msg("Settings saved to\n%s\nLC_KEY %s, Odoo API key %s" % (SETTINGS_PATH, mask(s["LC_KEY"]), mask(s["ODOO_API_KEY"])))
+            after_command(s)
         except Exception:
             _ui.messageBox("LaserCAM Settings failed:\n" + traceback.format_exc())
 
